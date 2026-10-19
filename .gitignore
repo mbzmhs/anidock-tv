@@ -1,0 +1,29 @@
+# Gradle / 构建产物
+.gradle/
+.kotlin/
+build/
+**/build/
+
+# 打包产物
+*.apk
+*.aab
+*.ap_
+
+# 本地环境(含 SDK 路径等,不进库)
+local.properties
+
+# IDE / AI 工具产物
+.idea/
+*.iml
+captures/
+.cxx/
+.zcode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log
+logs/
+app/src/main/assets/

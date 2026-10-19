@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-feature android:name="android.software.leanback" android:required="true" />
+    <uses-feature android:name="android.hardware.type.televisioner" android:required="true" />
+
+    <!-- API28 目标:传统外置存储权限,直写 /storage 含 U 盘;Kodi 可直接读 -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- 显式声明:升级安装(install -r)不会为未声明的 normal 权限补授,
+         缺了它 startForeground 会 SecurityException 直接崩进程 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+
+    <application
+        android:name=".AnidockApp"
+        android:allowBackup="false"
+        android:label="AniDock TV"
+        android:icon="@mipmap/ic_launcher"
+        android:theme="@style/Theme.AnidockTV"
+        android:supportsRtl="true"
+        android:usesCleartextTraffic="true">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:banner="@mipmap/ic_launcher"
+            android:launchMode="singleTask"
+            android:screenOrientation="landscape"
+            android:configChanges="keyboard|keyboardHidden|navigation|screenLayout|screenSize|smallestScreenSize|uiMode">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- 引擎看门狗前台服务:保活 app 进程 + 引擎被系统杀掉(电视待机)时自动拉起 -->
+        <service
+            android:name=".EngineWatchdogService"
+            android:exported="false" />
+
+        <!-- 完成后 ACTION_VIEW 打开文件:私有目录兜底换 content URI(共享存储直接 file://,不经此) -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/anidock_files" />
+        </provider>
+    </application>
+</manifest>

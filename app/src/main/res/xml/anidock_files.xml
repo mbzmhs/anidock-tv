@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- 共享外置存储(含 U 盘等 /storage 下的卷):正常路径走 file://,此处兜底 -->
+    <external-path name="shared" path="." />
+    <external-files-path name="ext-files" path="." />
+    <files-path name="files" path="." />
+    <cache-path name="cache" path="." />
+</paths>
