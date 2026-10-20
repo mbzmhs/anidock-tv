@@ -99,6 +99,11 @@ fun HomeScreen(
     var loading by remember { mutableStateOf(true) }
     // 当前加载 effect 的 Job:加载期间按返回键可取消(请求走 withContext(IO),取消即中断 OkHttp 在途请求)
     var loadJob by remember { mutableStateOf<Job?>(null) }
+    // 屏幕数据当前对应的 tab/filters(仅加载成功完成时更新):取消加载后据此回退,
+    // 避免"页码/ tab 已切过去、内容还是旧页"的不一致
+    val shown = remember { mutableStateOf<Pair<HomeTab, HomeFilters>?>(null) }
+    // 下一次 effect 重跑是"取消回退"引起的:只停住,不重新加载(否则刚取消的慢请求又跑起来了)
+    var skipLoad by remember { mutableStateOf(false) }
     // 侧边栏「下载任务」区:3s 轮询引擎进度,显示进行中+出错任务
     var dlTasks by remember { mutableStateOf<List<DownloadTaskView>>(emptyList()) }
     // 下载目录所在卷的剩余空间/占比,跟任务一起 3s 轮询刷新
@@ -125,11 +130,18 @@ fun HomeScreen(
     }
     // 任务菜单打开时 BACK 先关菜单
     if (taskMenu != null) BackHandler { taskMenu = null }
-    // 加载期间(圈圈在转)按返回键:取消在途请求而非退出 app。
-    // 侧边栏打开时让位给侧边栏自己的返回处理(关侧边栏/退组合框)
+    // 加载期间(圈圈在转)按返回键:取消在途请求而非退出 app,并把 tab/页码回退到屏幕数据
+    // 对应的状态(不回退的话:页码/tab 已切过去,内容还是旧页)。侧边栏打开时让位给侧边栏
+    // 自己的返回处理(关侧边栏/退组合框)
     BackHandler(enabled = active && loading && !showSidebar && taskMenu == null) {
         loadJob?.cancel()
         loading = false
+        val s = shown.value
+        if (s != null && (s.first != tab || s.second != filters)) {
+            skipLoad = true   // 回退引起的 effect 重跑要跳过,不能再发起加载
+            if (s.first != tab) onTab(s.first)   // 先回 tab:下面 onFilters 按回退后的 tab 落到对应那套筛选
+            if (s.second != filters) onFilters(s.second)
+        }
     }
 
     /** 执行任务菜单动作:与详情页同一套 repo 方法,随后刷新列表。 */
@@ -211,6 +223,11 @@ fun HomeScreen(
     }
 
     LaunchedEffect(tab, filters) {
+        if (skipLoad) {   // 取消加载后的回退重跑:停住即可,数据没变、不重新请求
+            skipLoad = false
+            loading = false
+            return@LaunchedEffect
+        }
         loadJob = coroutineContext[Job]   // 记下来:返回键据此取消整个加载(含在途 HTTP 请求)
         loading = true
         try {
@@ -235,6 +252,8 @@ fun HomeScreen(
                 list = com.mbzmhs.anidocktv.Services.repo.enrichWithLocalMeta(raw)
                 android.util.Log.d("AnidockTV", "followed load: page=$page size=${list.size} total=$total")
             }
+            // 加载成功:记录屏幕数据对应的 tab/filters(取消加载时回退到它)
+            shown.value = tab to filters
             // 焦点不抢:启动停在 tab 栏(便于切追番),列表加载只更新数据;仅空列表无网格可落时退回 tab 栏
             if (list.isEmpty()) { block = BLOCK_TAB; col = 0 }
         } catch (e: Exception) {
