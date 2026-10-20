@@ -39,6 +39,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import com.mbzmhs.anidocktv.data.AnimeCardData
 import com.mbzmhs.anidocktv.data.AnimeEntity
@@ -96,6 +97,8 @@ fun HomeScreen(
     var list by remember { mutableStateOf<List<AnimeCardData>>(emptyList()) }
     var total by remember { mutableStateOf(0) }
     var loading by remember { mutableStateOf(true) }
+    // 当前加载 effect 的 Job:加载期间按返回键可取消(请求走 withContext(IO),取消即中断 OkHttp 在途请求)
+    var loadJob by remember { mutableStateOf<Job?>(null) }
     // 侧边栏「下载任务」区:3s 轮询引擎进度,显示进行中+出错任务
     var dlTasks by remember { mutableStateOf<List<DownloadTaskView>>(emptyList()) }
     // 下载目录所在卷的剩余空间/占比,跟任务一起 3s 轮询刷新
@@ -122,6 +125,12 @@ fun HomeScreen(
     }
     // 任务菜单打开时 BACK 先关菜单
     if (taskMenu != null) BackHandler { taskMenu = null }
+    // 加载期间(圈圈在转)按返回键:取消在途请求而非退出 app。
+    // 侧边栏打开时让位给侧边栏自己的返回处理(关侧边栏/退组合框)
+    BackHandler(enabled = active && loading && !showSidebar && taskMenu == null) {
+        loadJob?.cancel()
+        loading = false
+    }
 
     /** 执行任务菜单动作:与详情页同一套 repo 方法,随后刷新列表。 */
     fun runTaskAction(t: DownloadTaskView, act: String) {
@@ -202,6 +211,7 @@ fun HomeScreen(
     }
 
     LaunchedEffect(tab, filters) {
+        loadJob = coroutineContext[Job]   // 记下来:返回键据此取消整个加载(含在途 HTTP 请求)
         loading = true
         try {
             com.mbzmhs.anidocktv.Services.repo.autoLogin()
