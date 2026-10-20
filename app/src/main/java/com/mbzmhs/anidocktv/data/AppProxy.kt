@@ -1,6 +1,7 @@
 package com.mbzmhs.anidocktv.data
 
 import android.util.Log
+import okhttp3.ConnectionPool
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.net.ProxySelector
@@ -27,6 +28,12 @@ object AppProxy {
 
     @Volatile var url: String = ""
         private set
+
+    /** 挂了本 selector 的 OkHttp 连接池(API/Coil)。keep-alive 空闲连接会被 OkHttp 直接
+     *  复用、不再调用 selector 裁决,代理变更时必须踢池,否则流量还走旧代理连接。 */
+    private val pools = java.util.concurrent.CopyOnWriteArrayList<ConnectionPool>()
+
+    fun register(pool: ConnectionPool) { pools.add(pool) }
 
     /** 当前应使用的代理(每次请求实时读取本对象状态);null = 直连。 */
     private fun current(): Proxy? {
@@ -91,14 +98,29 @@ object AppProxy {
         }
     }
 
-    /** 从引擎配置同步(mode+url)并落缓存。只在 app 启动阶段调用:
-     *  代理策略 = 每次启动跟随引擎设置,运行中改设置下次启动生效。 */
+    /** 从引擎配置同步(mode+url)并落缓存。启动阶段(引擎就绪后)+ 引擎设置页保存后调用。
+     *  状态真变了(热切换)→ 踢连接池(keep-alive 旧连接绕过 selector 裁决,不踢则流量还走旧代理)
+     *  + 清登录失败锁(否则切 tab 触发的重登会被旧失败记录挡住)。页面刷不刷由用户切 tab/翻页
+     *  自行触发——热切换只保证"下一次出网请求走新代理",不强制刷新页面。 */
     suspend fun sync(cfg: EngineService.EngineConfig, dao: SettingDao) {
-        mode = cfg.proxy.mode
-        url = cfg.proxy.url.trim()
+        val m = cfg.proxy.mode
+        val u = cfg.proxy.url.trim()
+        val changed = m != mode || u != url
+        mode = m
+        url = u
         runCatching { dao.put(SettingEntity(SettingKeys.APP_PROXY, "$mode|$url")) }
             .onFailure { Log.e(TAG, "缓存代理配置失败", it) }
-        Log.d(TAG, "同步引擎代理配置: mode=$mode url=$url")
+        if (changed) {
+            // evictAll 会关闭 socket:主线程的 socket 操作(含 close)必抛 NetworkOnMainThreadException,
+            // sync 由设置页主线程协程调用,踢池必须挪后台线程
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                for (p in pools) p.evictAll()
+            }
+            try {
+                com.mbzmhs.anidocktv.Services.repo.resetLoginError()
+            } catch (_: Exception) {
+            }
+        }
     }
 
     /** 启动时从 settings 表缓存恢复(格式 "mode|url");引擎起来后会被 sync 覆盖。 */

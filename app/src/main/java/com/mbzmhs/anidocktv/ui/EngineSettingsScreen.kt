@@ -40,6 +40,8 @@ import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
+import com.mbzmhs.anidocktv.Services
+import com.mbzmhs.anidocktv.data.AppProxy
 import com.mbzmhs.anidocktv.data.EngineService
 import com.mbzmhs.anidocktv.ui.theme.Anidock
 import com.mbzmhs.anidocktv.ui.tv.ImeMode
@@ -127,13 +129,17 @@ fun EngineSettingsScreen(onBack: () -> Unit, keyHit: KeyHit) {
         ImeMode.active = true
     }
 
-    /** 部分更新引擎配置并回读;失败给提示。 */
+    /** 部分更新引擎配置并回读;失败给提示。
+     *  保存成功后同步 app 层代理:mode/url 真变了 → AppProxy.sync 踢连接池+发刷新信号,
+     *  常驻首页自动重登+重拉,热切换不重启。 */
     fun applyPatch(patch: JsonObject, label: String) {
         scope.launch {
             val ok = EngineService.saveEngineConfig(patch)
             if (ok) {
                 kotlinx.coroutines.delay(500) // 等引擎落盘/刷新内存
-                cfg = EngineService.getEngineConfig()
+                val c2 = EngineService.getEngineConfig()
+                cfg = c2
+                c2?.let { AppProxy.sync(it, Services.settingDao) }
                 statusMsg = "已保存:$label"
             } else {
                 statusMsg = "保存失败:$label(引擎未运行)"

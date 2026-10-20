@@ -23,6 +23,10 @@ class AnidockApi(private var baseUrl: String) {
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
+    init {
+        // 连接池注册给 AppProxy:代理配置变更时踢掉 keep-alive 旧连接,新请求按新代理裁决
+        AppProxy.register(client.connectionPool)
+    }
 
     private val json = Json {
         ignoreUnknownKeys = true
