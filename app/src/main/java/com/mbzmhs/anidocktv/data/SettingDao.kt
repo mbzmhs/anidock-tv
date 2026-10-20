@@ -36,6 +36,7 @@ object SettingKeys {
     const val BG_IMAGE = "bgImage"                // 背景图路径,空 = 未启用
     const val BG_OPACITY = "bgOpacity"            // 背景图不透明度 0-100
     const val SEEN_BASELINE_RESET = "seenBaselineReset"   // 一次性:旧行 lastSeenEpisode 0→-1 归一已完成
+    const val APP_PROXY = "appProxy"                      // app 层代理缓存("mode|url",镜像引擎配置)
 
     const val DEFAULT_BASE_URL = "http://127.0.0.1:8080"
     const val DEFAULT_PASSWORD = ""

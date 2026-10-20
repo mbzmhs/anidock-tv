@@ -15,9 +15,11 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.concurrent.TimeUnit
 
-/** anidock 公开 API 客户端(只读 + 访客登录)。token 由外部注入并持久化。 */
+/** anidock 公开 API 客户端(只读 + 访客登录)。token 由外部注入并持久化。
+ *  出网走 AppProxy(跟随引擎代理配置):远端 API 经代理,环回(本机 anidock 服务)直连。 */
 class AnidockApi(private var baseUrl: String) {
     private val client = OkHttpClient.Builder()
+        .proxySelector(AppProxy.selector())
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .build()

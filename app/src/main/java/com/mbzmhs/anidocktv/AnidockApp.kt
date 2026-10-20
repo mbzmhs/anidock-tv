@@ -3,6 +3,7 @@ package com.mbzmhs.anidocktv
 import android.app.Application
 import com.mbzmhs.anidocktv.data.AnidockApi
 import com.mbzmhs.anidocktv.data.AnidockDb
+import com.mbzmhs.anidocktv.data.AppProxy
 import com.mbzmhs.anidocktv.data.AnidockRepository
 import com.mbzmhs.anidocktv.data.EngineService
 import com.mbzmhs.anidocktv.data.SettingDao
@@ -58,6 +59,8 @@ class AnidockApp : Application() {
             Services.folFilters = settingDao.get(SettingKeys.FOL_FILTERS)?.let { HomeFilters.fromJson(it) } ?: HomeFilters()
             settingDao.get(SettingKeys.BG_IMAGE)?.let { Services.bgImage = it }
             settingDao.get(SettingKeys.BG_OPACITY)?.toIntOrNull()?.let { Services.bgOpacity = it }
+            // app 层代理(引擎配置缓存):引擎未就绪时首页拉 API/封面也走代理
+            settingDao.get(SettingKeys.APP_PROXY)?.let { AppProxy.restore(it) }
         }
         // 背景图运行时状态(设置页修改后即时生效的 SnapshotState)
         com.mbzmhs.anidocktv.ui.BackgroundUi.path.value = Services.bgImage
@@ -74,6 +77,8 @@ class AnidockApp : Application() {
         Services.scope.launch {
             runCatching { Services.repo.ensureSeenBaseline() }   // 一次性:未读蓝点基线 0→-1 归一
             runCatching { EngineService.ensureRunning(this@AnidockApp) }
+            // 引擎就绪后回读真实代理配置,覆盖启动缓存(AppProxy 落一份到 settings 表)
+            runCatching { EngineService.getEngineConfig()?.let { AppProxy.sync(it, settingDao) } }
             // 启动时把引擎真实状态回写 DB:出错任务可能已复活(引擎重启恢复/用户 resume 续传),
             // 纠正为进行中,界面不再显示假"出错"。
             // 修复种子拉取流程遗留(建 BT 转换没走完的行 + 引擎里孤儿种子任务,连同 .torrent 清理);

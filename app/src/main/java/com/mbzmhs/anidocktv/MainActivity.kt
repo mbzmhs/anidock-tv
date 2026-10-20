@@ -46,6 +46,23 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         ensureStoragePermission()   // 权限被撤销时补一次请求,防止下载落盘静默失败
         setContent {
+            // 封面/海报(Coil)出网走 AppProxy(跟随引擎代理配置),与 API 客户端同一代理决策
+            val imageLoader = remember {
+                coil.ImageLoader.Builder(this)
+                    .okHttpClient(
+                        okhttp3.OkHttpClient.Builder()
+                            .proxySelector(com.mbzmhs.anidocktv.data.AppProxy.selector())
+                            .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+                            .readTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
+                            .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+                            .followRedirects(true)
+                            .build()
+                    )
+                    .build()
+            }
+            androidx.compose.runtime.CompositionLocalProvider(
+                coil.compose.LocalImageLoader provides imageLoader
+            ) {
             AnidockTheme {
                 // 默认首页:按设置打开对应 tab(番剧列表/我的追番)
                 var tab by remember { mutableStateOf(if (Services.homeTab == "FOLLOWED") HomeTab.FOLLOWED else HomeTab.LIST) }
@@ -170,6 +187,7 @@ class MainActivity : ComponentActivity() {
                         selectedAnimeId.value != null -> DetailScreen(animeId = selectedAnimeId.value!!, onBack = { selectedAnimeId.value = null }, onTagSearch = { tag -> tab = HomeTab.LIST; listFilters = listFilters.copy(search = tag, page = 1); scope.launch { Services.repo.set(SettingKeys.LIST_FILTERS, listFilters.toJson()) }; selectedAnimeId.value = null }, keyHit = keyHit, fromFollowed = (tab == HomeTab.FOLLOWED))
                     }
                 }
+            }
             }
         }
     }
