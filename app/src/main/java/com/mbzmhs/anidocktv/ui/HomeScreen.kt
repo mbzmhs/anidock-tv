@@ -376,8 +376,9 @@ fun HomeScreen(
 
     LaunchedEffect(keyHit.seq) {
         // 仅当首页在最上层(未进详情/设置)才处理按键,避免后台抢键;
-        // 加载期间(全屏遮罩)锁定操作,避免作用于还没刷新的旧内容
-        if (active && keyHit.seq > 0 && !loading) handleKey(keyHit.key)
+        // 加载期间(全屏遮罩)锁定操作,避免作用于还没刷新的旧内容;
+        // 但侧边栏已打开时放行——网络卡死在加载态时用户还能开侧边栏/进设置自救
+        if (active && keyHit.seq > 0 && (showSidebar || !loading)) handleKey(keyHit.key)
     }
 
     // 焦点驱动滚动:Tab→顶,网格→对应行,分页→内容底
