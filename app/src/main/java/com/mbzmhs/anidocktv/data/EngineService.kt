@@ -97,7 +97,6 @@ object EngineService {
                 try {
                     process = ProcessBuilder(
                         bin.absolutePath,
-                        "-headless",   // 同一二进制:无头模式(无 Wails 窗口/托盘/自启)
                         "-port", Services.enginePort.toString(),
                         "-dir", dlDir.absolutePath,
                         "-data", dataDir.absolutePath,
