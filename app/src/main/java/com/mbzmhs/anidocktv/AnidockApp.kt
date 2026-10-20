@@ -80,7 +80,7 @@ class AnidockApp : Application() {
             // 先于 sync:把挂死的行挂回 BT 任务后,sync 按正常任务回写。
             runCatching { Services.repo.repairTorrentFlow() }
             // 注意:启动不做出错任务清理——出错任务留着有续传复活的机会(单击重试/引擎重启恢复);
-            // 删任务/文件只走用户在剧集上长按"删除任务和文件";设置页"清理缓存"只收孤儿文件。
+            // 删任务/文件只走用户在剧集上长按"取消下载";设置页"清理缓存"只收孤儿文件。
             runCatching { Services.repo.syncAllDownloadTasks() }
             // 清 DB 幽灵行(completed 但文件已丢),与任务/文件无关
             runCatching { Services.repo.cleanupGhostCompletedRows() }

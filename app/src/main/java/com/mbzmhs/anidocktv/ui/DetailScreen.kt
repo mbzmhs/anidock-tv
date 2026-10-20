@@ -350,7 +350,7 @@ fun DetailScreen(animeId: Long, onBack: () -> Unit, onTagSearch: (String) -> Uni
         val rows = dlTasks.filter { it.episode == ep.episode }
         if (rows.isEmpty()) return
         scope.launch {
-            for (row in rows) Services.repo.deleteDownload(row)
+            for (row in rows) Services.repo.cancelDownload(row)
             dlTasks = Services.repo.downloadTasks(animeId)
         }
     }
@@ -359,9 +359,9 @@ fun DetailScreen(animeId: Long, onBack: () -> Unit, onTagSearch: (String) -> Uni
     fun openEpMenu(ep: EpisodeView) {
         menuIdx = 0
         epMenu = EpMenu(ep, when (epDlInfo(ep.episode, dlTasks).state) {
-            "fetching", "creating", "queued", "downloading", "seeding", "paused", "moving" -> listOf("删除任务和文件")
+            "fetching", "creating", "queued", "downloading", "seeding", "paused", "moving" -> listOf("取消下载")
             "completed" -> listOf("重新下载(选来源)", "删除文件")
-            "error" -> listOf("重试", "删除任务和文件")
+            "error" -> listOf("重试", "取消下载")
             else -> listOf("下载(最优来源)", "选择来源下载")
         })
     }
@@ -393,7 +393,7 @@ fun DetailScreen(animeId: Long, onBack: () -> Unit, onTagSearch: (String) -> Uni
                         "下载(最优来源)" -> startEpDownload(ep, ep.best)
                         "重试" -> retryEpDownload(ep)
                         "选择来源下载", "重新下载(选来源)" -> { sourcePick = ep; sourceIdx = 0 }
-                        "删除任务和文件", "删除文件" -> deleteEpDownload(ep)
+                        "取消下载", "删除文件" -> deleteEpDownload(ep)
                     }
                 }
             }

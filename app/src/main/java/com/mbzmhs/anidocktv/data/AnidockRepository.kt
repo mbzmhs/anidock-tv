@@ -344,8 +344,9 @@ class AnidockRepository(
         return EngineService.actionTask(row.taskId, "resume")
     }
 
-    /** 取消下载:和删除一样彻底——删引擎任务(带文件)、清最终目录与工作区残留、同集多行全删,不留痕迹。
-     *  旧实现只 cancelTask(任务还挂在引擎里 canceled)+删一行 TV 行,.mp4/.!zd/.zdl.part 全留着。 */
+    /** 取消下载(菜单里唯一的删除入口):删引擎任务(带文件)、清最终目录与工作区残留、
+     *  同集多行全删,不留痕迹。旧实现只 cancelTask(任务还挂在引擎里 canceled)+删一行
+     *  TV 行,.mp4/.!zd/.zdl.part 全留着。 */
     suspend fun cancelDownload(row: DownloadTaskEntity) {
         // 删引擎任务(file=1 连 .torrent 一并删);同集多行全删,不留任何 TV 行痕迹。
         if (row.taskId.isNotEmpty()) EngineService.deleteTask(row.taskId, true)
@@ -402,23 +403,6 @@ class AnidockRepository(
         }
     }
 
-    /** 删除任务:引擎 deleteTask(file=1)+ 删成片+半成品(.!zd/.zdl.part 兜底)+ 同集多行全删。 */
-    suspend fun deleteDownload(row: DownloadTaskEntity) {
-        if (row.taskId.isNotEmpty()) EngineService.deleteTask(row.taskId, true)
-        if (row.fileName.isNotBlank()) {
-            try {
-                // 引擎直写最终目录:删成片+半成品(.!zd/.zdl.part 兜底)。删任务即删成片。
-                File(row.fileDir, row.fileName).delete()
-                File(row.fileDir, row.fileName + ".zdl.part").delete()
-                File(row.fileDir, row.fileName + ".!zd").delete()
-            } catch (_: Exception) {
-            }
-        }
-        // 同集多行全删,不留 TV 行痕迹
-        downloadDao.byAnime(row.anidockId).filter { it.episode == row.episode }
-            .forEach { downloadDao.deleteRow(it.id) }
-    }
-
     /**
      * 缓存使用量(字节):孤儿半成品 .!zd/.zdl.part + 图片缓存。
      * 引擎里还存在的任务(含出错可续传的)的文件不计入——那不是"可清理的缓存"。
@@ -446,7 +430,7 @@ class AnidockRepository(
     /**
      * 清理缓存(设置页手动):删下载目录里"引擎已不认识的"孤儿半成品(.!zd/.zdl.part)
      * + 清图片缓存(封面,清了会重新下载)。引擎里还存在的任务(含出错可续传的)
-     * 的文件一律不动——删任务/删文件是用户在剧集上长按"删除任务和文件"的权限,
+     * 的文件一律不动——删任务/删文件是用户在剧集上长按"取消下载"的权限,
      * 清理缓存只收真正的孤儿。返回清理描述(供设置页状态栏显示)。
      */
     suspend fun cleanCache(): String = withContext(Dispatchers.IO) {

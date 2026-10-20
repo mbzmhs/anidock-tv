@@ -137,10 +137,6 @@ fun HomeScreen(
                 "重试" -> runCatching {
                     com.mbzmhs.anidocktv.Services.repo.retryDownload(t.task.anidockId, t.task.episode)
                 }.getOrDefault(false)
-                "删除任务和文件" -> {
-                    com.mbzmhs.anidocktv.Services.repo.deleteDownload(t.task)
-                    true
-                }
                 else -> false
             }
             dlTasks = com.mbzmhs.anidocktv.Services.repo.activeDownloadTasks()
@@ -481,10 +477,10 @@ fun HomeScreen(
 
 /** 任务菜单动作(与详情页剧集菜单同源同语义)。 */
 private fun taskActions(t: DownloadTaskView): List<String> = when (t.status) {
-    "paused" -> listOf("继续下载", "取消下载", "删除任务和文件")
-    "queued", "downloading", "seeding" -> listOf("暂停下载", "取消下载", "删除任务和文件")
-    "error" -> listOf("重试", "删除任务和文件")
-    else -> listOf("删除任务和文件")
+    "paused" -> listOf("继续下载", "取消下载")
+    "queued", "downloading", "seeding" -> listOf("暂停下载", "取消下载")
+    "error" -> listOf("重试", "取消下载")
+    else -> listOf("取消下载")
 }
 
 private fun epText(ep: Float): String =
