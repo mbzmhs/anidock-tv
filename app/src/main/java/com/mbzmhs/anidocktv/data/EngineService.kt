@@ -72,14 +72,15 @@ object EngineService {
         val wanted: Boolean = true,    // 是否在当前文件选择内(未选=跳过不下载)
     )
 
-    /** 任务详情(GET /api/tasks/{id}/detail 的子集):合集文件选择对话框用。 */
+    /** 任务详情(GET /api/tasks/{id}/detail 的子集):合集文件选择对话框用。
+     *  files 可空:引擎对尚无文件清单的任务(如磁链解析中/引擎刚重启未装载)会回 files:null。 */
     @Serializable
     data class ZdlDetail(
         val status: String = "",
         val filename: String = "",
         val size: Long = 0,
         val arrived: Long = 0,
-        val files: List<ZdlFile> = emptyList(),
+        val files: List<ZdlFile>? = null,
     )
 
     private fun base(): String = "http://127.0.0.1:${Services.enginePort}"
@@ -488,6 +489,8 @@ object EngineService {
                 Log.e(TAG, "engine: taskDetail HTTP ${resp.code}")
                 null
             } else json.decodeFromString<ZdlDetail>(text)
+                // 归一化:files:null(尚无文件清单)对调用方按空表处理,避免逐处判空
+                ?.let { if (it.files == null) it.copy(files = emptyList()) else it }
         } catch (e: Exception) {
             Log.e(TAG, "engine: taskDetail 失败(引擎可能未运行)", e)
             null

@@ -128,10 +128,11 @@ fun TorrentFilesOverlay(
         while (true) {
             val d = EngineService.taskDetail(taskId)
             if (d != null) {
-                entries = d.files
+                val files = d.files.orEmpty()   // taskDetail 已把 files:null 归一为空表
+                entries = files
                 status = d.status
-                if (selected == null && d.files.isNotEmpty()) {
-                    selected = d.files.filter { it.wanted }.map { it.relPath() }.toSet()
+                if (selected == null && files.isNotEmpty()) {
+                    selected = files.filter { it.wanted }.map { it.relPath() }.toSet()
                 }
                 loading = false
                 loadErr = ""

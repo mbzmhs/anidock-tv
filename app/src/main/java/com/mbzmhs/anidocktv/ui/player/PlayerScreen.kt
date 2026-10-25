@@ -50,6 +50,7 @@ import com.mbzmhs.anidocktv.player.PlayerEpisode
 import com.mbzmhs.anidocktv.player.PlayerExtras
 import com.mbzmhs.anidocktv.player.PlayerSwitch
 import com.mbzmhs.anidocktv.player.TrackRow
+import com.mbzmhs.anidocktv.player.VlcEngine
 import com.mbzmhs.anidocktv.player.VlcPlayerController
 import com.mbzmhs.anidocktv.ui.theme.Anidock
 import com.mbzmhs.anidocktv.ui.tv.K
@@ -309,7 +310,7 @@ fun PlayerScreen(
             add(MenuRow("解码:${decodeName(com.mbzmhs.anidocktv.player.VlcEngine.decodeMode)}(确认切换)") {
                 val keep = controller.timeMs
                 com.mbzmhs.anidocktv.player.VlcEngine.decodeMode = (com.mbzmhs.anidocktv.player.VlcEngine.decodeMode + 1) % 3
-                controller.open(source)
+                pScope.launch { controller.open(source) }
                 pendingSeekMs = keep
                 closeMenu(); pulseHud()
             })
@@ -370,7 +371,7 @@ fun PlayerScreen(
     fun onKey(key: Key, longPress: Boolean) {
         // 出错面板:确认重试,其余按键(除 BACK,由 BackHandler 走退出)忽略
         if (controller.failed != null) {
-            if (key == K.CENTER || key == K.ENTER) controller.open(source)
+            if (key == K.CENTER || key == K.ENTER) pScope.launch { controller.open(source) }
             return
         }
         val sec = section
@@ -461,25 +462,28 @@ fun PlayerScreen(
 
     // 边下边播的"未就绪"是正常生命周期(引擎在抓头尾元数据/连 peer),不弹错误面板:
     // 失败期间保持转圈,并无限自动重试(间隔 2.5 秒)直到出画面;退出随时可按 BACK。
-    // 本地文件错误是真实故障,仍走错误面板(见下)。
+    // 本地文件错误是真实故障,仍走错误面板(见下)。原生层楔死(VlcEngine.wedged)对两种源
+    // 都是终态故障:停止重试并按真实错误处理。
     LaunchedEffect(controller.failed) {
         if (source !is PlaybackSource.HttpStream) return@LaunchedEffect
-        while (controller.failed != null) {
+        while (controller.failed != null && !VlcEngine.wedged) {
             delay(2_500)
-            if (controller.failed != null) controller.open(source)
+            if (controller.failed != null && !VlcEngine.wedged) controller.open(source)
         }
     }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         // 视频画面:VLCVideoLayout(SurfaceView+独立字幕层)。挂载必须等 View attach 后(主线程),
-        // 用 View.post 保证;attachViews 一次性,重组不重复。
+        // 用 View.post 保证;挂载本体由控制器串行调度(见 attachTo),完成后回调才置 surfaceReady
+        // 放行开播。attachViews 一次性,重组不重复。
         AndroidView(
             modifier = Modifier.fillMaxSize(),
-            factory = { ctx -> VLCVideoLayout(ctx).also { l -> l.post { controller.attachTo(l); surfaceReady = true } } },
+            factory = { ctx -> VLCVideoLayout(ctx).also { l -> l.post { controller.attachTo(l) { surfaceReady = true } } } },
         )
 
-        // 缓冲转圈:流场景失败期间也维持转圈(未就绪是正常生命周期,交给后台无限重试)
-        val streamWaiting = source is PlaybackSource.HttpStream && controller.failed != null
+        // 缓冲转圈:流场景失败期间也维持转圈(未就绪是正常生命周期,交给后台无限重试);
+        // 原生层楔死除外——那是终态,停止转圈走错误面板
+        val streamWaiting = source is PlaybackSource.HttpStream && controller.failed != null && !VlcEngine.wedged
         if ((controller.buffering || streamWaiting) && !controller.ended) {
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -495,12 +499,15 @@ fun PlayerScreen(
             }
         }
 
-        // 错误面板只用于本地文件(真实故障);流场景的失败是等待生命周期,保持转圈不弹面板
-        if (source is PlaybackSource.LocalFile) {
+        // 错误面板用于本地文件(真实故障)与原生层楔死(终态);流场景的普通失败是等待生命周期,保持转圈不弹面板
+        if (source is PlaybackSource.LocalFile || VlcEngine.wedged) {
             controller.failed?.let { msg ->
                 MenuPanel(title = "播放失败") {
                     Text(msg, color = Anidock.Err, fontSize = 16.sp, modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp))
-                    Text("按确认键重试,按返回键退出", color = Anidock.Text3, fontSize = 13.sp, modifier = Modifier.padding(bottom = 14.dp))
+                    Text(
+                        if (VlcEngine.wedged) "按返回键退出" else "按确认键重试,按返回键退出",
+                        color = Anidock.Text3, fontSize = 13.sp, modifier = Modifier.padding(bottom = 14.dp),
+                    )
                 }
             }
         }
