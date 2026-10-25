@@ -84,6 +84,8 @@ fun HomeScreen(
     onAnimeClick: (AnimeEntity) -> Unit,
     onFollow: (AnimeEntity, Boolean) -> Unit,
     onSettings: () -> Unit,
+    /** 合集文件列表里直接边下边播(侧边栏任务进入;播引擎环回流,由 MainActivity 建播放会话) */
+    onPlayStream: (taskId: String, url: String, label: String) -> Unit = { _, _, _ -> },
     keyHit: KeyHit,
 ) {
     // 从当前 tab 的 filters 解出字段,便于下方沿用原变量名;翻页/侧边栏改动都经 onFilters(filters.copy(...)) 回写
@@ -108,9 +110,11 @@ fun HomeScreen(
     var dlTasks by remember { mutableStateOf<List<DownloadTaskView>>(emptyList()) }
     // 下载目录所在卷的剩余空间/占比,跟任务一起 3s 轮询刷新
     var diskInfo by remember { mutableStateOf(diskFreeLabel()) }
-    // 任务操作菜单(CENTER 于任务行):暂停/继续、取消、重试(出错)、删除——与详情页同源同语义
+    // 任务操作菜单(CENTER 于任务行):暂停/继续、取消、重试(出错)、文件列表——与详情页同源同语义
     var taskMenu by remember { mutableStateOf<DownloadTaskView?>(null) }
     var taskMenuIdx by remember { mutableStateOf(0) }
+    // 合集文件列表对话框(从任务菜单"文件列表/选择文件"进入):引擎任务 id
+    var filesDlg by remember { mutableStateOf<String?>(null) }
     val taskScope = rememberCoroutineScope()
     val context = androidx.compose.ui.platform.LocalContext.current
     LaunchedEffect(Unit) {
@@ -289,6 +293,8 @@ fun HomeScreen(
     }
 
     fun handleKey(key: Key) {
+        // 合集文件对话框打开时按键全归对话框(其内部自行消费),底层不响应
+        if (filesDlg != null) return
         // 任务菜单打开时按键全归菜单,底层不响应(BACK 由 BackHandler 关闭)
         taskMenu?.let { m ->
             val acts = taskActions(m)
@@ -298,7 +304,12 @@ fun HomeScreen(
                 K.CENTER, K.ENTER -> {
                     val act = acts.getOrNull(taskMenuIdx) ?: return@let
                     taskMenu = null
-                    runTaskAction(m, act)
+                    if (act == "选择文件" || act == "文件列表") {
+                        if (m.task.taskId.isNotBlank()) filesDlg = m.task.taskId
+                        else android.widget.Toast.makeText(context, "任务尚未建立", android.widget.Toast.LENGTH_SHORT).show()
+                    } else {
+                        runTaskAction(m, act)
+                    }
                 }
                 else -> {}
             }
@@ -502,13 +513,41 @@ fun HomeScreen(
             diskInfo = diskInfo,
         )
         taskMenu?.let { m -> TaskMenuOverlay(m, taskMenuIdx) }
+        filesDlg?.let { tid ->
+            val t = dlTasks.firstOrNull { it.task.taskId == tid }
+            TorrentFilesOverlay(
+                taskId = tid,
+                title = listOf(
+                    t?.title,
+                    t?.task?.episode?.let { ep -> if (ep > 0f) "第${ep.toInt()}集" else "合集" },
+                ).filterNotNull().filter { it.isNotBlank() }.joinToString(" "),
+                keyHit = keyHit,
+                active = active,
+                onClose = {
+                    filesDlg = null
+                    taskScope.launch { dlTasks = com.mbzmhs.anidocktv.Services.repo.activeDownloadTasks() }
+                },
+                onPlayFile = { path, name ->
+                    // 合集内指定文件直接边下边播(引擎按 file 参数切流会话)
+                    filesDlg = null
+                    val gen = System.currentTimeMillis() / 1000
+                    val url = com.mbzmhs.anidocktv.data.EngineService.streamUrl(tid, gen, path)
+                    onPlayStream(
+                        tid, url,
+                        listOf(t?.title, name, "边下边播").filterNotNull().filter { it.isNotBlank() }.joinToString(" "),
+                    )
+                },
+            )
+        }
     }
 }
 
 /** 任务菜单动作(与详情页剧集菜单同源同语义)。 */
 private fun taskActions(t: DownloadTaskView): List<String> = when (t.status) {
-    "paused" -> listOf("继续下载", "取消下载")
-    "queued", "downloading", "seeding" -> listOf("暂停下载", "取消下载")
+    "paused" -> listOf("继续下载", "文件列表", "取消下载")
+    "queued", "downloading", "seeding" -> listOf("暂停下载", "文件列表", "取消下载")
+    // 多文件合集:待选文件,进文件列表勾选后才开始下载
+    "choosing" -> listOf("选择文件", "取消下载")
     "error" -> listOf("重试", "取消下载")
     else -> listOf("取消下载")
 }

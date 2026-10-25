@@ -107,14 +107,11 @@ class AnidockRepository(
             val title = anime.title.ifBlank { "anime${anime.id}" }
             // 引擎直接下最终目录(去私有工作区):dir = 下载根目录/<番剧名>
             val dir = File(Services.downloadDir, title).apply { mkdirs() }
-            // 换源/重下:同一集之前的文件先删(成片+半成品+种子 .torrent),旧源文件不会被子任务覆盖
+            // 换源/重下:同一集之前的文件先删(成片+半成品+种子 .torrent;合集=整目录树),
+            // 旧源文件不会被子任务覆盖
             runCatching {
                 for (old in downloadDao.byAnime(anime.id).filter { it.episode == ep }) {
-                    if (old.fileName.isNotBlank()) {
-                        File(old.fileDir, old.fileName).delete()
-                        File(old.fileDir, old.fileName + ".zdl.part").delete()
-                        File(old.fileDir, old.fileName + ".!zd").delete()
-                    }
+                    deleteEpisodeFiles(old.fileDir, old.fileName)
                 }
             }
             // 占位行:状态 fetching。整个生命周期被状态机盖住,后续重复点击被查重拦下。
@@ -244,13 +241,9 @@ class AnidockRepository(
                 updated++
                 continue
             }
-            // 多文件种子(choosing):anidock 源不支持,直接报错删任务+文件
-            if (t.status == "choosing") {
-                failChoosingTask(r, t.id)
-                updated++
-                continue
-            }
-            // BT 任务:引擎直写最终目录,completed 即最终态,无需搬文件
+            // BT 任务(含 choosing=多文件合集待选文件):choosing 行回写后剧集按钮显示"待选文件",
+            // 单击/长按可进合集文件列表对话框(chooseFiles 落定后引擎转 waiting 开始下载)。
+            // BT 产物:引擎直写最终目录,completed 即最终态,无需搬文件
             val done = if (t.kind == "bt" && t.arrived > 0) t.arrived else t.downloaded
             val st = mapZdlStatus(t.status)
             val progress = if (st == "completed") 1f else if (t.size > 0) (done.toFloat() / t.size).coerceIn(0f, 1f) else 0f
@@ -350,16 +343,7 @@ class AnidockRepository(
     suspend fun cancelDownload(row: DownloadTaskEntity) {
         // 删引擎任务(file=1 连 .torrent 一并删);同集多行全删,不留任何 TV 行痕迹。
         if (row.taskId.isNotEmpty()) EngineService.deleteTask(row.taskId, true)
-        if (row.fileName.isNotBlank()) {
-            try {
-                // 引擎直写最终目录:删成片+半成品(.!zd/.zdl.part 兜底,引擎 running 分支靠协程 defer 未必删)。
-                // 删任务即删成片(用户已确认);同集换源留下的旧文件由换源清理兜底。
-                File(row.fileDir, row.fileName).delete()
-                File(row.fileDir, row.fileName + ".zdl.part").delete()
-                File(row.fileDir, row.fileName + ".!zd").delete()
-            } catch (_: Exception) {
-            }
-        }
+        deleteEpisodeFiles(row.fileDir, row.fileName)
         downloadDao.byAnime(row.anidockId).filter { it.episode == row.episode }
             .forEach { downloadDao.deleteRow(it.id) }
     }
@@ -371,25 +355,26 @@ class AnidockRepository(
         return EngineService.actionTask(row.taskId, action)
     }
 
-    /**
-     * 多文件种子(引擎 choosing 状态:元数据就绪,等用户选文件)。anidock 源只出
-     * 单文件种子,遇到多文件直接报错:标 error + 删引擎任务 + 删文件(workDir/
-     * finalDir 残留)。TV 行保留(error 态),用户可重新下载。
-     */
-    private suspend fun failChoosingTask(r: DownloadTaskEntity, taskId: String) {
-        if (taskId.isNotEmpty()) EngineService.deleteTask(taskId, true)
-        if (r.fileName.isNotBlank()) {
-            try {
-                if (r.fileDir.isNotBlank()) {
-                    java.io.File(r.fileDir, r.fileName).delete()
-                    java.io.File(r.fileDir, r.fileName + ".zdl.part").delete()
-                    java.io.File(r.fileDir, r.fileName + ".!zd").delete()
-                }
-            } catch (_: Exception) {
+    /** 递归删除文件/目录树(合集任务的产物是整个目录;单文件退化为普通删除)。 */
+    private fun deleteTree(f: File) {
+        if (f.isDirectory) f.listFiles()?.forEach { deleteTree(it) }
+        runCatching { f.delete() }
+    }
+
+    /** 删除某集的旧产物(换源重下/取消下载共用):合集=整目录树,单文件=成片+半成品。 */
+    private fun deleteEpisodeFiles(dir: String, fileName: String) {
+        if (dir.isBlank() || fileName.isBlank()) return
+        try {
+            val f = File(dir, fileName)
+            if (f.isDirectory) {
+                deleteTree(f)
+            } else {
+                f.delete()
+                File(dir, fileName + ".zdl.part").delete()
+                File(dir, fileName + ".!zd").delete()
             }
+        } catch (_: Exception) {
         }
-        downloadDao.upsert(r.copy(status = "error", speed = 0, updatedAt = System.currentTimeMillis()))
-        android.util.Log.w("AnidockTV", "choosing: 多文件种子不支持,已报错删任务 ${r.releaseTitle}")
     }
 
     /** 需展示/回写的任务(含番剧名),侧边栏任务列表用:进行中 + 出错(出错一目了然,可就地重试)。 */
@@ -469,7 +454,8 @@ class AnidockRepository(
     }
 
     private fun mapZdlStatus(s: String): String = when (s) {
-        "waiting", "choosing" -> "queued"
+        "waiting" -> "queued"
+        "choosing" -> "choosing"   // 多文件合集:元数据已就绪,等用户在文件列表里勾选
         "running" -> "downloading"
         "seeding" -> "seeding"
         "completed" -> "completed"
@@ -478,9 +464,10 @@ class AnidockRepository(
     }
 
     private companion object {
-        // 进行中全集:含占位的 fetching(拉种子)/creating(建任务)与搬文件的 moving。
+        // 进行中全集:含占位的 fetching(拉种子)/creating(建任务)、搬文件的 moving
+        // 与合集 choosing(待选文件;不算终态,查重需拦住重复建任务)。
         // 查重命中这些就不建新任务(注意:不含 error,失败的行不挡重试)。
-        val ACTIVE_DL_STATUS = setOf("fetching", "creating", "queued", "downloading", "seeding", "paused", "moving")
+        val ACTIVE_DL_STATUS = setOf("fetching", "creating", "choosing", "queued", "downloading", "seeding", "paused", "moving")
         // sync 回写目标集 = 进行中 + error(error 行可能已在引擎侧自愈续传,需把真实状态写回)。
         val SYNC_DL_STATUS = ACTIVE_DL_STATUS + "error"
     }

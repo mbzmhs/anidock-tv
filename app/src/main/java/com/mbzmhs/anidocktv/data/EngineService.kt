@@ -63,6 +63,25 @@ object EngineService {
         val arrived: Long = 0,   // BT:已落盘去重字节(进度条口径)
     )
 
+    /** BT 种子内一个文件(详情接口):path 为种子内相对路径(子目录为多段,以 / 连接)。 */
+    @Serializable
+    data class ZdlFile(
+        val path: List<String> = emptyList(),
+        val size: Long = 0,
+        val done: Long = 0,            // 已落定字节(进度展示)
+        val wanted: Boolean = true,    // 是否在当前文件选择内(未选=跳过不下载)
+    )
+
+    /** 任务详情(GET /api/tasks/{id}/detail 的子集):合集文件选择对话框用。 */
+    @Serializable
+    data class ZdlDetail(
+        val status: String = "",
+        val filename: String = "",
+        val size: Long = 0,
+        val arrived: Long = 0,
+        val files: List<ZdlFile> = emptyList(),
+    )
+
     private fun base(): String = "http://127.0.0.1:${Services.enginePort}"
 
     private fun pingSync(): Boolean = try {
@@ -170,9 +189,8 @@ object EngineService {
             if (magnet != null) put("magnet", kotlinx.serialization.json.JsonPrimitive(magnet))
             if (torrentB64 != null) put("torrentB64", kotlinx.serialization.json.JsonPrimitive(torrentB64))
             put("dir", kotlinx.serialization.json.JsonPrimitive(dir))
-            // choose=true:多文件种子挂 choosing 等选文件,TV 侧检测到 choosing 即报错删任务
-            // (anidock 源只出单文件)。单文件种子引擎自动放行,不受影响。
-            // 旧值 false 让引擎自动选文件直接下,多文件合集会静默下错文件。
+            // choose=true:多文件种子(合集)挂 choosing 等选文件,TV 侧弹文件列表对话框让用户
+            // 勾选(POST /files 落定后转 waiting 开始下载);单文件种子引擎自动放行,不受影响。
             put("choose", kotlinx.serialization.json.JsonPrimitive(true))
         }).toRequestBody()
         try {
@@ -451,10 +469,56 @@ object EngineService {
 
     /**
      * 边下边播流地址(环回,供内置播放器直接播)。file 省略=引擎自动选种子内最大的媒体文件;
+     * 指定 file(种子内相对路径,子目录以 / 连接)= 合集里播指定文件。
      * v 为会话代次,每次进入换值即开新流会话,旧代次的请求被引擎以 409 拒绝(防切集后旧播放器拽回旧会话)。
      */
-    fun streamUrl(taskId: String, generation: Long): String =
-        base() + "/api/tasks/" + taskId + "/stream?v=" + generation
+    fun streamUrl(taskId: String, generation: Long, file: String? = null): String =
+        base() + "/api/tasks/" + taskId + "/stream?v=" + generation +
+            (if (!file.isNullOrEmpty()) "&file=" + java.net.URLEncoder.encode(file, "UTF-8") else "")
+
+    /** 任务详情:文件列表(种子内相对路径/大小/进度/是否在选)+ 状态。合集文件对话框用;失败返回 null。 */
+    suspend fun taskDetail(taskId: String): ZdlDetail? = withContext(Dispatchers.IO) {
+        try {
+            val resp = client.newCall(
+                Request.Builder().url(base() + "/api/tasks/" + taskId + "/detail").get().build()
+            ).execute()
+            val text = resp.body?.string() ?: ""
+            resp.close()
+            if (!resp.isSuccessful) {
+                Log.e(TAG, "engine: taskDetail HTTP ${resp.code}")
+                null
+            } else json.decodeFromString<ZdlDetail>(text)
+        } catch (e: Exception) {
+            Log.e(TAG, "engine: taskDetail 失败(引擎可能未运行)", e)
+            null
+        }
+    }
+
+    /**
+     * 落定/修改 BT 文件选择:choosing 确认后立即排队下载;运行中/做种/已完成改选由引擎
+     * 自动按新选择重启会话(缩选已覆盖时只改账不打断)。至少一个文件,失败返回 false。
+     */
+    suspend fun chooseFiles(taskId: String, files: List<String>): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val body = json.encodeToString(JsonObject.serializer(), buildJsonObject {
+                put(
+                    "files",
+                    kotlinx.serialization.json.JsonArray(files.map { kotlinx.serialization.json.JsonPrimitive(it) })
+                )
+            }).toRequestBody()
+            val resp = createClient.newCall(
+                Request.Builder().url(base() + "/api/tasks/" + taskId + "/files").post(body).build()
+            ).execute()
+            val text = resp.body?.string() ?: ""
+            val ok = resp.isSuccessful
+            if (!ok) Log.e(TAG, "engine: chooseFiles HTTP ${resp.code} $text")
+            resp.close()
+            ok
+        } catch (e: Exception) {
+            Log.e(TAG, "engine: chooseFiles 异常", e)
+            false
+        }
+    }
 
     /** 停止边下边播,还原纯下载优先级(播放器退出时调用;不调引擎也会在 5 分钟空闲后自动回收)。 */
     suspend fun stopStream(taskId: String) {

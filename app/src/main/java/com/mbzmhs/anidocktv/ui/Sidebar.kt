@@ -160,6 +160,7 @@ private fun DlTaskRow(t: DownloadTaskView, focused: Boolean) {
         "paused" -> Anidock.Accent2
         "seeding" -> Anidock.Ok
         "error" -> Anidock.Err
+        "choosing" -> Anidock.Accent
         else -> Anidock.Text3
     }
     val sz = fmtSize(t.size)
@@ -169,6 +170,7 @@ private fun DlTaskRow(t: DownloadTaskView, focused: Boolean) {
             val sizePart = if (sz.isNotEmpty()) "${dl}/$sz" else dl
             "${(t.progress * 100f).toInt()}% · ${fmtSpeed(t.speed)}" + if (sizePart.isNotEmpty()) " · $sizePart" else ""
         }
+        "choosing" -> "待选文件" + if (sz.isNotEmpty()) " · $sz" else ""
         "queued" -> "排队中" + if (sz.isNotEmpty()) " · $sz" else ""
         "paused" -> "已暂停" + if (sz.isNotEmpty()) " · $sz" else ""
         "seeding" -> "做种中" + if (sz.isNotEmpty()) " · $sz" else ""
