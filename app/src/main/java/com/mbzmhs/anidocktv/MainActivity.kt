@@ -199,8 +199,8 @@ class MainActivity : ComponentActivity() {
                         },
                         onFollow = { a, f -> scope.launch { Services.repo.setFollowed(a, f) } },
                         onSettings = { showSettings.value = true; showSidebar = false },
-                        onPlayStream = { taskId, url, label ->
-                            // 侧边栏合集文件列表里点播:与详情页同一套播放会话(停流+速度采样)
+                        onPlayStream = { taskId, url, label, extras ->
+                            // 侧边栏合集文件列表里点播:与详情页同一套播放会话(停流+速度采样+选集上下文)
                             playerSession.value = PlayerSession(
                                 source = PlaybackSource.HttpStream(url, label),
                                 onStopped = { scope.launch { com.mbzmhs.anidocktv.data.EngineService.stopStream(taskId) } },
@@ -208,6 +208,13 @@ class MainActivity : ComponentActivity() {
                                     com.mbzmhs.anidocktv.data.EngineService.listTasks()
                                         .firstOrNull { it.id == taskId }?.speed ?: 0L
                                 },
+                                extras = extras,
+                            )
+                        },
+                        onPlayFile = { file, label ->
+                            // 侧边栏文件列表播放已下完的文件:本地播放
+                            playerSession.value = PlayerSession(
+                                source = PlaybackSource.LocalFile(file.absolutePath, label),
                             )
                         },
                         keyHit = keyHit,

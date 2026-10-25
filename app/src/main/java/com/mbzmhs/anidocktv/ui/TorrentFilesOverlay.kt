@@ -45,8 +45,7 @@ import com.mbzmhs.anidocktv.ui.tv.KeyHit
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-/** 可边下边播的视频扩展名(与 DetailScreen 播放定位同一口径)。 */
-private val VIDEO_EXTS = setOf("mp4", "m4v", "mkv", "avi", "mov", "ts", "flv", "wmv", "webm", "mpg", "mpeg")
+/** 可边下边播的视频扩展名与判定共用 ui.PlaybackExtras.kt 的 internal 定义。 */
 
 /** 列表行:目录头行(整组勾选,子目录按路径逐级出现)或文件行。 */
 private sealed interface FR {
@@ -56,15 +55,8 @@ private sealed interface FR {
 
 private fun ZdlFile.relPath(): String = path.joinToString("/")
 
-/**
- * 未落定的勾选暂存(按任务 id,进程内存活):对话框内勾选后按 BACK 退出并没提交引擎
- * (choosing 态 WantedFiles 仍为空=全选),重开时引擎回显不了这些勾选——暂存让
- * BACK 不丢勾选、重开恢复;「开始下载」落定后引擎口径即权威,清掉暂存。
- */
-private val pendingSelection = mutableMapOf<String, Set<String>>()
-
 private fun isVideoFile(f: ZdlFile): Boolean =
-    f.path.lastOrNull()?.substringAfterLast('.', "")?.lowercase() in VIDEO_EXTS
+    isVideoName(f.path.lastOrNull() ?: "")
 
 /** 路径逐段字典序(段数少的排前,保证目录头行先于其下内容出现)。 */
 private fun cmpPaths(a: List<String>, b: List<String>): Int {
@@ -130,7 +122,7 @@ fun TorrentFilesOverlay(
     val openedSeq = remember { keyHit.seq }
 
     // 首次加载 + 3s 轮询(进度/状态);引擎失联时保留已加载内容继续重试。
-    // 初始勾选:优先恢复上次未落定的暂存(BACK 退出不丢),否则按引擎 wanted 回显;
+    // 初始勾选=引擎 wanted 回显(唯一权威口径:已落定的选择引擎持久着);
     // 仅在拿到非空文件表后才锁定(空响应不锁,防止把勾选定死为空)。
     LaunchedEffect(taskId) {
         while (true) {
@@ -139,8 +131,7 @@ fun TorrentFilesOverlay(
                 entries = d.files
                 status = d.status
                 if (selected == null && d.files.isNotEmpty()) {
-                    selected = pendingSelection[taskId]?.takeIf { it.isNotEmpty() }
-                        ?: d.files.filter { it.wanted }.map { it.relPath() }.toSet()
+                    selected = d.files.filter { it.wanted }.map { it.relPath() }.toSet()
                 }
                 loading = false
                 loadErr = ""
@@ -164,8 +155,6 @@ fun TorrentFilesOverlay(
 
     fun setSel(s: Set<String>) {
         selected = s
-        // 空勾选无暂存意义(重开按引擎口径回显),非空才暂存:BACK 退出不丢,重开恢复
-        if (s.isEmpty()) pendingSelection.remove(taskId) else pendingSelection[taskId] = s
     }
 
     fun toggleFile(i: Int) {
@@ -185,10 +174,7 @@ fun TorrentFilesOverlay(
             return
         }
         scope.launch {
-            if (EngineService.chooseFiles(taskId, sel.toList())) {
-                pendingSelection.remove(taskId)   // 已落定,此后以引擎 wanted 回显为准
-                onClose()
-            }
+            if (EngineService.chooseFiles(taskId, sel.toList())) onClose()
             else Toast.makeText(context, "保存失败,稍后再试", Toast.LENGTH_SHORT).show()
         }
     }

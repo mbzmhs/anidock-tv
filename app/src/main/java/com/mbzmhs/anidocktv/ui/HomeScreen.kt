@@ -85,7 +85,9 @@ fun HomeScreen(
     onFollow: (AnimeEntity, Boolean) -> Unit,
     onSettings: () -> Unit,
     /** 合集文件列表里直接边下边播(侧边栏任务进入;播引擎环回流,由 MainActivity 建播放会话) */
-    onPlayStream: (taskId: String, url: String, label: String) -> Unit = { _, _, _ -> },
+    onPlayStream: (taskId: String, url: String, label: String, extras: com.mbzmhs.anidocktv.player.PlayerExtras?) -> Unit = { _, _, _, _ -> },
+    /** 文件列表播放时目标文件已下完 → 本地播放(侧边栏入口) */
+    onPlayFile: (file: java.io.File, label: String) -> Unit = { _, _ -> },
     keyHit: KeyHit,
 ) {
     // 从当前 tab 的 filters 解出字段,便于下方沿用原变量名;翻页/侧边栏改动都经 onFilters(filters.copy(...)) 回写
@@ -528,14 +530,39 @@ fun HomeScreen(
                     taskScope.launch { dlTasks = com.mbzmhs.anidocktv.Services.repo.activeDownloadTasks() }
                 },
                 onPlayFile = { path, name ->
-                    // 合集内指定文件直接边下边播(引擎按 file 参数切流会话)
+                    // 合集内指定文件:已下完→本地播放,否则边下边播;播放器选集上下文
+                    // 用共用构建器(与详情页同口径,剧集列表按需从 API 拉)
                     filesDlg = null
-                    val gen = System.currentTimeMillis() / 1000
-                    val url = com.mbzmhs.anidocktv.data.EngineService.streamUrl(tid, gen, path)
-                    onPlayStream(
-                        tid, url,
-                        listOf(t?.title, name, "边下边播").filterNotNull().filter { it.isNotBlank() }.joinToString(" "),
-                    )
+                    val row = t?.task
+                    if (row == null || row.taskId.isBlank()) {
+                        android.widget.Toast.makeText(context, "任务不可用", android.widget.Toast.LENGTH_SHORT).show()
+                        return@TorrentFilesOverlay
+                    }
+                    taskScope.launch {
+                        val bld = PlaybackExtrasBuilder(
+                            taskScope, row.anidockId, { t?.title ?: "" },
+                            { com.mbzmhs.anidocktv.Services.repo.episodes(row.anidockId) },
+                        )
+                        val d = com.mbzmhs.anidocktv.data.EngineService.taskDetail(row.taskId)
+                        val complete = d?.status == "completed" ||
+                            d?.files?.firstOrNull { it.path.joinToString("/") == path }
+                                ?.let { it.size > 0 && it.done >= it.size } == true
+                        val local = if (complete && row.fileDir.isNotBlank() && row.fileName.isNotBlank()) {
+                            java.io.File(java.io.File(row.fileDir, row.fileName), path).takeIf { it.isFile && it.length() > 0 }
+                        } else null
+                        val extras = bld.buildExtras(row.episode, path, row.taskId, subtitleDirOf(row.fileDir, row.fileName))
+                        if (local != null) {
+                            onPlayFile(local, listOf(t?.title, name).filterNotNull().filter { it.isNotBlank() }.joinToString(" "))
+                        } else {
+                            val gen = System.currentTimeMillis() / 1000
+                            onPlayStream(
+                                row.taskId,
+                                com.mbzmhs.anidocktv.data.EngineService.streamUrl(row.taskId, gen, path),
+                                listOf(t?.title, name, "边下边播").filterNotNull().filter { it.isNotBlank() }.joinToString(" "),
+                                extras,
+                            )
+                        }
+                    }
                 },
             )
         }

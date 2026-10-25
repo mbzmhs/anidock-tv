@@ -16,8 +16,8 @@ android {
         // 26:java.time(追番"最新更新"排序的时间解析)自 API 26 原生可用,再低需 core library desugaring
         minSdk = 26
         targetSdk = 28
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
 
         // libvlc-all 自带 4 个 ABI(共 ~200MB so),只保留电视的 armeabi-v7a(单 ABI ~39MB)
         ndk { abiFilters += "armeabi-v7a" }
