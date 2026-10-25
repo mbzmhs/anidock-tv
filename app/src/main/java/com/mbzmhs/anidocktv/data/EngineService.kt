@@ -448,4 +448,23 @@ object EngineService {
             false
         }
     }
+
+    /**
+     * 边下边播流地址(环回,供内置播放器直接播)。file 省略=引擎自动选种子内最大的媒体文件;
+     * v 为会话代次,每次进入换值即开新流会话,旧代次的请求被引擎以 409 拒绝(防切集后旧播放器拽回旧会话)。
+     */
+    fun streamUrl(taskId: String, generation: Long): String =
+        base() + "/api/tasks/" + taskId + "/stream?v=" + generation
+
+    /** 停止边下边播,还原纯下载优先级(播放器退出时调用;不调引擎也会在 5 分钟空闲后自动回收)。 */
+    suspend fun stopStream(taskId: String) {
+        runCatching {
+            withContext(Dispatchers.IO) {
+                val resp = client.newCall(
+                    Request.Builder().url(base() + "/api/tasks/" + taskId + "/stream/stop").post("".toRequestBody()).build()
+                ).execute()
+                resp.close()
+            }
+        }.onFailure { Log.w(TAG, "engine: 停流失败 $taskId", it) }
+    }
 }

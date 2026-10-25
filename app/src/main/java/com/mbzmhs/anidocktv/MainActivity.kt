@@ -23,12 +23,14 @@ import androidx.compose.ui.input.key.type
 import com.mbzmhs.anidocktv.data.AnimeEntity
 import com.mbzmhs.anidocktv.data.SettingKeys
 import com.mbzmhs.anidocktv.model.HomeFilters
+import com.mbzmhs.anidocktv.player.PlaybackSource
 import com.mbzmhs.anidocktv.ui.BackgroundController
 import com.mbzmhs.anidocktv.ui.DetailScreen
 import com.mbzmhs.anidocktv.ui.EngineSettingsScreen
 import com.mbzmhs.anidocktv.ui.HomeScreen
 import com.mbzmhs.anidocktv.ui.HomeTab
 import com.mbzmhs.anidocktv.ui.SettingsScreen
+import com.mbzmhs.anidocktv.ui.player.PlayerScreen
 import com.mbzmhs.anidocktv.ui.theme.AnidockTheme
 
 /**
@@ -41,6 +43,16 @@ class MainActivity : ComponentActivity() {
     private val selectedAnimeId = mutableStateOf<Long?>(null)
     private val showSettings = mutableStateOf(false)
     private val showEngineSettings = mutableStateOf(false)
+
+    /** 内置播放器会话:source=播放源(本地文件/引擎边下边播环回流);onStopped=退出播放时的回调
+     *  (边下边播用它停流,让引擎立刻还原纯下载优先级;本地播放为 null);
+     *  speedSampler=真实下载速度采样(字节/秒,引擎 BT 任务速度,供播放器缓冲/信息条显示)。 */
+    private class PlayerSession(
+        val source: PlaybackSource,
+        val onStopped: (() -> Unit)? = null,
+        val speedSampler: (suspend () -> Long)? = null,
+    )
+    private val playerSession = mutableStateOf<PlayerSession?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -85,8 +97,8 @@ class MainActivity : ComponentActivity() {
                 }
 
                 // 侧边栏打开时,返回键:组合框子级(年/季/每页)先退回主列表,主列表才关闭侧边栏。
-                // 仅在停留在首页(未进详情/设置)时生效,避免与详情/设置各自的返回处理冲突。
-                BackHandler(enabled = showSidebar && selectedAnimeId.value == null && !showSettings.value) {
+                // 仅在停留在首页(未进详情/设置/播放器)时生效,避免与详情/设置/播放器各自的返回处理冲突。
+                BackHandler(enabled = showSidebar && selectedAnimeId.value == null && !showSettings.value && playerSession.value == null) {
                     if (sidebarMode != "main") sidebarMode = "main"
                     else showSidebar = false
                 }
@@ -115,7 +127,12 @@ class MainActivity : ComponentActivity() {
                     if (com.mbzmhs.anidocktv.ui.tv.ImeMode.active) return@onPreviewKeyEvent false
                     if (ke.key == Key(android.view.KeyEvent.KEYCODE_MENU)) {
                         if (ke.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                        if (selectedAnimeId.value == null && !showSettings.value) {
+                        if (playerSession.value != null) {
+                            // 播放器打开时 MENU 分发给播放器(弹播放菜单),不碰底层侧边栏
+                            seqRef[0]++
+                            keyHit = com.mbzmhs.anidocktv.ui.tv.KeyHit(ke.key, seqRef[0])
+                            true
+                        } else if (selectedAnimeId.value == null && !showSettings.value) {
                             showSidebar = !showSidebar
                             if (showSidebar) sidebarMode = "main"   // 每次打开侧边栏都回到主列表
                             true
@@ -167,7 +184,7 @@ class MainActivity : ComponentActivity() {
                         showSidebar = showSidebar,
                         sidebarMode = sidebarMode,
                         onSidebarMode = { sidebarMode = it },
-                        active = selectedAnimeId.value == null && !showSettings.value,
+                        active = selectedAnimeId.value == null && !showSettings.value && playerSession.value == null,
                         onTab = ::goHomeTab,
                         onFilters = ::onFilters,
                         onAnimeClick = { a ->
@@ -182,7 +199,40 @@ class MainActivity : ComponentActivity() {
                     when {
                         showEngineSettings.value -> EngineSettingsScreen(onBack = { showEngineSettings.value = false }, keyHit = keyHit)
                         showSettings.value -> SettingsScreen(onBack = { showSettings.value = false }, onEngineSettings = { showEngineSettings.value = true }, keyHit = keyHit)
-                        selectedAnimeId.value != null -> DetailScreen(animeId = selectedAnimeId.value!!, onBack = { selectedAnimeId.value = null }, onTagSearch = { tag -> tab = HomeTab.LIST; listFilters = listFilters.copy(search = tag, page = 1); scope.launch { Services.repo.set(SettingKeys.LIST_FILTERS, listFilters.toJson()) }; selectedAnimeId.value = null }, keyHit = keyHit, fromFollowed = (tab == HomeTab.FOLLOWED))
+                        selectedAnimeId.value != null -> DetailScreen(
+                            animeId = selectedAnimeId.value!!,
+                            onBack = { selectedAnimeId.value = null },
+                            onTagSearch = { tag -> tab = HomeTab.LIST; listFilters = listFilters.copy(search = tag, page = 1); scope.launch { Services.repo.set(SettingKeys.LIST_FILTERS, listFilters.toJson()) }; selectedAnimeId.value = null },
+                            keyHit = keyHit,
+                            fromFollowed = (tab == HomeTab.FOLLOWED),
+                            active = playerSession.value == null,   // 播放器覆盖期间详情页不消费按键
+                            onPlayFile = { file, label ->
+                                playerSession.value = PlayerSession(PlaybackSource.LocalFile(file.absolutePath, label))
+                            },
+                            onPlayStream = { taskId, url, label ->
+                                playerSession.value = PlayerSession(
+                                    source = PlaybackSource.HttpStream(url, label),
+                                    onStopped = { scope.launch { com.mbzmhs.anidocktv.data.EngineService.stopStream(taskId) } },
+                                    speedSampler = {
+                                        // 引擎任务速度=真实 BT 下载速度(libvlc 统计在 3.x 实测不可用)
+                                        com.mbzmhs.anidocktv.data.EngineService.listTasks()
+                                            .firstOrNull { it.id == taskId }?.speed ?: 0L
+                                    },
+                                )
+                            },
+                        )
+                    }
+                    // 内置播放器覆盖层:组合在最后(BackHandler 最先),下方页面保持组合不丢状态
+                    playerSession.value?.let { s ->
+                        PlayerScreen(
+                            source = s.source,
+                            keyHit = keyHit,
+                            onClose = {
+                                s.onStopped?.invoke()
+                                playerSession.value = null
+                            },
+                            speedSampler = s.speedSampler,
+                        )
                     }
                 }
             }

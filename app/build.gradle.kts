@@ -17,6 +17,9 @@ android {
         targetSdk = 28
         versionCode = 1
         versionName = "0.1.0"
+
+        // libvlc-all 自带 4 个 ABI(共 ~200MB so),只保留电视的 armeabi-v7a(单 ABI ~39MB)
+        ndk { abiFilters += "armeabi-v7a" }
     }
 
     buildTypes {
@@ -55,4 +58,9 @@ dependencies {
 
     // 图片(Coil,Compose)
     implementation("io.coil-kt:coil-compose:2.7.0")
+
+    // 内置播放器核心:libVLC Android 绑定稳定线,内核 3.0.x 最新稳定;so 由 abiFilters 过滤。
+    // 选 3.7.2:3.7.3+ 的 AAR 要求 minCompileSdk=36 且依赖 kotlin-stdlib 2.2(需升整条工具链),
+    // 3.7.2 是不升工具链能用的最新版(2026 年中发布,内核为 3.0.24 一线)。
+    implementation("org.videolan.android:libvlc-all:3.7.2")
 }

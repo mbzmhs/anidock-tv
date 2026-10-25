@@ -114,6 +114,17 @@ private fun videoMime(name: String): String = when (name.substringAfterLast('.',
 }
 
 /**
+ * 下载产物定位为可直接播放的视频文件:目录(BT 多文件种子)取字典序第一个视频,
+ * 单文件直接返回;不存在/无视频返回 null。
+ */
+private fun resolveVideoFile(file: java.io.File): java.io.File? {
+    return if (file.isDirectory) {
+        file.listFiles { f -> f.isFile && f.length() > 0 && f.extension.lowercase() in VIDEO_EXTS }
+            ?.sortedBy { it.name }?.firstOrNull()
+    } else if (file.isFile && file.length() > 0) file else null
+}
+
+/**
  * 下载完成后打开文件:ACTION_VIEW 交给系统分发给可用播放器(Kodi/系统视频应用)。
  * - 共享存储(/storage、/sdcard,含 U 盘)直接 file:// 路径:Kodi 对 content URI
  *   有 _onNewIntent 崩溃 bug(19.0 实测),file:// 是它最稳的入口;本进程已关闭
@@ -156,7 +167,16 @@ private fun openDownloadedVideo(context: android.content.Context, file: java.io.
  * 焦点即状态:整页可滚动,UP/DOWN/LEFT/RIGHT 在焦点目标间移动并带动滚动,CENTER 激活。
  */
 @Composable
-fun DetailScreen(animeId: Long, onBack: () -> Unit, onTagSearch: (String) -> Unit, keyHit: KeyHit, fromFollowed: Boolean = false) {
+fun DetailScreen(
+    animeId: Long,
+    onBack: () -> Unit,
+    onTagSearch: (String) -> Unit,
+    keyHit: KeyHit,
+    fromFollowed: Boolean = false,
+    active: Boolean = true,
+    onPlayFile: (file: java.io.File, label: String) -> Unit = { _, _ -> },
+    onPlayStream: (taskId: String, url: String, label: String) -> Unit = { _, _, _ -> },
+) {
     BackHandler { onBack() }
     val context = LocalContext.current
     val density = LocalDensity.current
@@ -355,11 +375,32 @@ fun DetailScreen(animeId: Long, onBack: () -> Unit, onTagSearch: (String) -> Uni
         }
     }
 
+    /** 边下边播:直接播引擎环回流。引擎按播放头 Range 重排 piece 优先级(先头尾元数据再顺序窗口),
+     *  v 代次隔离会话;打开即记"上次看到",与本地播放一致。 */
+    fun startStreamPlayback(ep: EpisodeView) {
+        val row = bestTask(ep.episode, dlTasks)
+        if (row == null || row.taskId.isBlank()) {
+            Toast.makeText(context, "任务尚未建立,稍后再试", Toast.LENGTH_SHORT).show()
+            return
+        }
+        lastOpened = ep.episode
+        scope.launch { Services.repo.recordLastOpened(animeId, ep.episode) }
+        val gen = System.currentTimeMillis() / 1000
+        val url = com.mbzmhs.anidocktv.data.EngineService.streamUrl(row.taskId, gen)
+        val epTag = if (ep.episode > 0f) "第${ep.episode.toInt()}集" else "合集"
+        onPlayStream(
+            row.taskId, url,
+            listOf(a?.title, epTag, "边下边播").filterNotNull().filter { it.isNotBlank() }.joinToString(" "),
+        )
+    }
+
     /** 长按菜单:按当前下载状态给出不同操作。 */
     fun openEpMenu(ep: EpisodeView) {
         menuIdx = 0
         epMenu = EpMenu(ep, when (epDlInfo(ep.episode, dlTasks).state) {
-            "fetching", "creating", "queued", "downloading", "seeding", "paused", "moving" -> listOf("取消下载")
+            // 下载中:短按已改为边下边播,暂停/继续收进长按菜单
+            "fetching", "creating", "queued", "downloading", "seeding", "moving" -> listOf("暂停下载", "取消下载")
+            "paused" -> listOf("继续下载", "取消下载")
             "completed" -> listOf("重新下载(选来源)", "删除文件")
             "error" -> listOf("重试", "取消下载")
             else -> listOf("下载(最优来源)", "选择来源下载")
@@ -389,12 +430,13 @@ fun DetailScreen(animeId: Long, onBack: () -> Unit, onTagSearch: (String) -> Uni
                     val act = m.actions.getOrNull(menuIdx) ?: return@let
                     val ep = m.ep
                     epMenu = null
-                    when (act) {
-                        "下载(最优来源)" -> startEpDownload(ep, ep.best)
-                        "重试" -> retryEpDownload(ep)
-                        "选择来源下载", "重新下载(选来源)" -> { sourcePick = ep; sourceIdx = 0 }
-                        "取消下载", "删除文件" -> deleteEpDownload(ep)
-                    }
+                        when (act) {
+                            "下载(最优来源)" -> startEpDownload(ep, ep.best)
+                            "重试" -> retryEpDownload(ep)
+                            "选择来源下载", "重新下载(选来源)" -> { sourcePick = ep; sourceIdx = 0 }
+                            "暂停下载", "继续下载" -> pauseResumeEpDownload(ep)
+                            "取消下载", "删除文件" -> deleteEpDownload(ep)
+                        }
                 }
             }
             return
@@ -460,25 +502,27 @@ fun DetailScreen(animeId: Long, onBack: () -> Unit, onTagSearch: (String) -> Uni
                         openEpMenu(ep)
                     } else {
                         // 单击按状态走:无文件=下载最优来源;出错=重试(优先续传,引擎侧任务没了才重下);
-                        // 下载中=暂停;已暂停=继续;完成=打开文件(intent 交 Kodi/系统播放器)。删除只走长按菜单。
+                        // 下载中/排队/做种=边下边播(暂停走长按菜单);已暂停=继续;完成=内置播放器播放。
+                        // 删除只走长按菜单。
                         when (epDlInfo(ep.episode, dlTasks).state) {
                             "none" -> startEpDownload(ep, ep.best)
                             "error" -> retryEpDownload(ep)
-                            "queued", "downloading", "seeding" -> pauseResumeEpDownload(ep)
+                            "queued", "downloading", "seeding" -> startStreamPlayback(ep)
                             "paused" -> pauseResumeEpDownload(ep)
                             "completed" -> {
                                 val row = epDlInfo(ep.episode, dlTasks).row
                                 if (row == null || row.fileDir.isBlank() || row.fileName.isBlank()) {
                                     Toast.makeText(context, "已完成但缺少文件记录", Toast.LENGTH_SHORT).show()
                                 } else {
-                                    runCatching {
-                                        openDownloadedVideo(context, java.io.File(row.fileDir, row.fileName))
-                                    }.onSuccess {
-                                        // 成功打开播放才算"上次看到":立即刷新指示器(不等重进详情页),并落库
+                                    val file = resolveVideoFile(java.io.File(row.fileDir, row.fileName))
+                                    if (file == null) {
+                                        Toast.makeText(context, "下载目录里没有可播放的视频文件", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        // 打开内置播放器即视为"上次看到"(与旧版外接播放器行为一致),立即刷新指示器并落库
                                         lastOpened = ep.episode
                                         scope.launch { Services.repo.recordLastOpened(animeId, ep.episode) }
-                                    }.onFailure {
-                                        Toast.makeText(context, "无法打开:${it.message}", Toast.LENGTH_SHORT).show()
+                                        val epTag = if (ep.episode > 0f) "第${ep.episode.toInt()}集" else "合集"
+                                        onPlayFile(file, listOf(a?.title, epTag).filterNotNull().filter { it.isNotBlank() }.joinToString(" "))
                                     }
                                 }
                             }
@@ -494,7 +538,8 @@ fun DetailScreen(animeId: Long, onBack: () -> Unit, onTagSearch: (String) -> Uni
     }
 
     LaunchedEffect(keyHit.seq) {
-        if (keyHit.seq > 0) handleDetailKey(keyHit.key, keyHit.longPress)
+        // 内置播放器覆盖期间不消费按键(active 门控,与首页同款)
+        if (keyHit.seq > 0 && active) handleDetailKey(keyHit.key, keyHit.longPress)
     }
 
     // 滚动让焦点目标进入可见区。
