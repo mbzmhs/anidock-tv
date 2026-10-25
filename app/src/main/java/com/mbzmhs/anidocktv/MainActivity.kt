@@ -6,11 +6,19 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -31,6 +39,7 @@ import com.mbzmhs.anidocktv.ui.HomeScreen
 import com.mbzmhs.anidocktv.ui.HomeTab
 import com.mbzmhs.anidocktv.ui.SettingsScreen
 import com.mbzmhs.anidocktv.ui.player.PlayerScreen
+import com.mbzmhs.anidocktv.ui.theme.Anidock
 import com.mbzmhs.anidocktv.ui.theme.AnidockTheme
 
 /**
@@ -106,6 +115,31 @@ class MainActivity : ComponentActivity() {
                 BackHandler(enabled = showSidebar && selectedAnimeId.value == null && !showSettings.value && playerSession.value == null) {
                     if (sidebarMode != "main") sidebarMode = "main"
                     else showSidebar = false
+                }
+
+                // 首页根层(侧边栏已关、无详情/设置/播放器)的返回键:两次确认退出。
+                // 首次提示"再次按返回键退出应用",1 秒内再按才退出;也是播放器楔死后
+                // "完全退出应用"提示所指的操作入口。
+                var exitArmAt by remember { mutableStateOf(0L) }
+                var exitToast by remember { mutableStateOf(false) }
+                BackHandler(enabled = !showSidebar && selectedAnimeId.value == null && !showSettings.value && !showEngineSettings.value && playerSession.value == null) {
+                    val now = android.os.SystemClock.uptimeMillis()
+                    if (now - exitArmAt <= 1_000L) {
+                        // 退出顺序:先停看门狗服务(否则它会把引擎再拉起、进程复活),再停引擎子进程,
+                        // 最后收尾杀进程(播放器原生线程/后台协程不残留)。引擎任务状态已持久,重开自动恢复。
+                        stopService(android.content.Intent(this@MainActivity, EngineWatchdogService::class.java))
+                        com.mbzmhs.anidocktv.data.EngineService.stop()
+                        finishAndRemoveTask()
+                        android.os.Process.killProcess(android.os.Process.myPid())
+                    } else {
+                        exitArmAt = now
+                        exitToast = true
+                        scope.launch {
+                            kotlinx.coroutines.delay(1_000L)
+                            // 期间未再按(未重新计时)才收起提示
+                            if (android.os.SystemClock.uptimeMillis() - exitArmAt >= 1_000L) exitToast = false
+                        }
+                    }
                 }
 
                 // 按键只在 Activity 最外层 onPreviewKeyEvent 可靠捕获(无焦点时事件只到根节点)。
@@ -279,6 +313,20 @@ class MainActivity : ComponentActivity() {
                                 )
                             },
                         )
+                    }
+                    // 退出确认提示(首页两次返回退出):置顶居中,1 秒后自动消失
+                    if (exitToast) {
+                        Surface(
+                            color = Color.Black.copy(alpha = 0.55f),
+                            shape = RoundedCornerShape(6.dp),
+                            modifier = Modifier.align(Alignment.Center),
+                        ) {
+                            Text(
+                                "再次按返回键退出应用",
+                                color = Anidock.Text, fontSize = 18.sp,
+                                modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
+                            )
+                        }
                     }
                 }
             }
