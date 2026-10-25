@@ -15,12 +15,21 @@ import org.videolan.libvlc.util.VLCVideoLayout
 
 /**
  * libVLC 进程级单例:native 库加载与实例创建只做一次,播放器会话关闭后复用。
- * 选项沿用官方 App 的稳定默认:倍速保音调(--audio-time-stretch)+ soxr 重采样;
- * 硬件解码由 Media 默认选项启用(MediaCodec,不含解码复制),无需在这里配置。
+ * 选项沿用官方 App 的稳定默认:倍速保音调(--audio-time-stretch)+ soxr 重采样。
  * 注:3.7.2 绑定无 buildFontCache 预热接口(3.7.3+ 才有),首个字幕渲染会现场扫字体,首次略慢属正常。
  */
 object VlcEngine {
     @Volatile private var lib: LibVLC? = null
+
+    /**
+     * 解码模式(进程级;0=硬件直渲默认,1=硬件无直渲,2=软件)。
+     * - 硬件直渲:MediaCodec 输出直接上屏,最快;但直渲与 Surface 的绑定偶发失败 → 黑屏有声,
+     *   开播时序已修正 + 看门狗自愈,仍偶发可切"硬件无直渲"。
+     * - 硬件无直渲(:no-mediacodec-dr):仍走 MediaCodec,帧拷贝后再上屏,绕开直渲绑定路径,
+     *   适合 10bit HEVC(芯片能硬解,但本机 armv7 软解 10bit 几乎不出帧,软解救不了)。
+     * - 软件:ffmpeg 全量软解,给芯片缺解码器的老编码用(8bit 可用,10bit HEVC 算力不够)。
+     */
+    @Volatile var decodeMode: Int = 0
 
     fun get(context: Context): LibVLC = lib ?: synchronized(this) {
         lib ?: LibVLC(
@@ -48,7 +57,8 @@ data class ChapterRow(val index: Int, val name: String, val timeOffsetMs: Long)
  * - 章节无变化事件,靠 TimeChanged 轮询 getChapter() 对比。
  */
 class VlcPlayerController(context: Context) {
-    val player = MediaPlayer(VlcEngine.get(context))
+    private val vlc = VlcEngine.get(context)
+    val player = MediaPlayer(vlc)
 
     // ---- 播放状态(事件驱动) ----
     var playing by mutableStateOf(false)
@@ -96,6 +106,9 @@ class VlcPlayerController(context: Context) {
         private set
     var scaleType by mutableStateOf(MediaPlayer.ScaleType.SURFACE_BEST_FIT)
         private set
+    /** 当前视频输出数(0=画面未建立,黑屏看门狗的判定依据)。 */
+    var voutCount by mutableIntStateOf(0)
+        private set
 
     private var viewsAttached = false
 
@@ -124,7 +137,10 @@ class VlcPlayerController(context: Context) {
                 }
                 MediaPlayer.Event.SeekableChanged -> seekable = e.seekable
                 MediaPlayer.Event.PausableChanged -> pausable = e.pausable
-                MediaPlayer.Event.Vout -> player.updateVideoSurfaces()
+                MediaPlayer.Event.Vout -> {
+                    voutCount = e.getVoutCount()
+                    player.updateVideoSurfaces()
+                }
                 MediaPlayer.Event.ESAdded, MediaPlayer.Event.ESDeleted, MediaPlayer.Event.ESSelected -> {
                     refreshSnapshot()
                     autoSelectSubtitle()
@@ -170,13 +186,20 @@ class VlcPlayerController(context: Context) {
         timeMs = 0
         lengthMs = 0
         autoSubDone = false
+        voutCount = 0
         // 出错后的重试必须先 stop:libvlc 出错后输入线程不复位,不 stop 直接换 Media 再 play()
         // 会被静默吞掉(表现为"按重试没反应",必须重建播放器实例才恢复)。错误态下 stop 快速返回。
         runCatching { if (player.hasMedia()) player.stop() }
-        when (source) {
-            is PlaybackSource.LocalFile -> player.play(source.path)
-            is PlaybackSource.HttpStream -> player.play(Uri.parse(source.url))
+        // 显式建 Media 以控制解码模式(play(path) 快捷方式恒用硬解直渲)
+        val media = when (source) {
+            is PlaybackSource.LocalFile -> org.videolan.libvlc.Media(vlc, source.path)
+            is PlaybackSource.HttpStream -> org.videolan.libvlc.Media(vlc, Uri.parse(source.url))
         }
+        media.setHWDecoderEnabled(VlcEngine.decodeMode != 2, false)
+        if (VlcEngine.decodeMode == 1) media.addOption(":no-mediacodec-dr")
+        player.media = media
+        media.release()
+        player.play()
     }
 
     fun togglePlayPause() {

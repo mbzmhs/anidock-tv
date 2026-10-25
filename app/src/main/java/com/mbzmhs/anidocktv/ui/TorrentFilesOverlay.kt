@@ -101,7 +101,7 @@ private fun buildRows(entries: List<ZdlFile>): List<FR> {
  * 合集(多文件种子)文件列表对话框:
  * - 引擎任务文件树(子目录为目录头行,确认=整组勾选/取消;文件行确认=单个勾选);
  * - 底部动作行:只选视频 / 全选 / 开始下载(把勾选落定到引擎,choosing 转排队、进行中按新选择重启);
- * - 视频文件长按确认=就地边下边播该文件(任务需在下载/做种/完成;choosing 需先开始下载);
+ * - 视频文件行按 RIGHT=就地边下边播该文件(任务需在下载/做种/完成;choosing 需先开始下载);
  * - 3s 轮询文件进度;勾选只在对话框内改动,轮询不覆盖。
  * 独立组件:只依赖 taskId/keyHit,不 import 业务类型;宿主屏幕需在对话框打开时停用自己的按键处理。
  */
@@ -199,20 +199,22 @@ fun TorrentFilesOverlay(
         when (keyHit.key) {
             K.UP -> if (idx > 0) idx--
             K.DOWN -> if (idx < total - 1) idx++
+            K.RIGHT -> {
+                // 视频文件行:RIGHT=就地边下边播(不用长按,避免与播放器的"长按=菜单"打架)
+                val r = rows.getOrNull(idx)
+                if (r is FR.F) {
+                    val f = entries.getOrNull(r.idx)
+                    if (f != null && isVideoFile(f)) {
+                        if (playable) onPlayFile(f.relPath(), f.path.last())
+                        else Toast.makeText(context, "任务未在下载,先选文件开始下载", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
             K.CENTER, K.ENTER -> if (rows.isNotEmpty()) {
                 val r = rows.getOrNull(idx)
                 when {
                     r is FR.Dir -> toggleDir(r.kids)
-                    r is FR.F -> {
-                        val f = entries.getOrNull(r.idx)
-                        if (f != null) {
-                            if (keyHit.longPress) {
-                                if (isVideoFile(f) && playable) onPlayFile(f.relPath(), f.path.last())
-                                else if (isVideoFile(f))
-                                    Toast.makeText(context, "任务未在下载,先选文件开始下载", Toast.LENGTH_SHORT).show()
-                            } else toggleFile(r.idx)
-                        }
-                    }
+                    r is FR.F -> toggleFile(r.idx)
                     else -> when (idx - rows.size) {   // 底部动作行
                         0 -> setSel(entries.filter { isVideoFile(it) }.map { it.relPath() }.toSet())
                         1 -> setSel(entries.map { it.relPath() }.toSet())
@@ -284,7 +286,7 @@ fun TorrentFilesOverlay(
                 }
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "确认 勾选/整组切换 · 长按确认 播放视频 · BACK 返回",
+                    "确认 勾选/整组切换 · 右键 播放视频 · BACK 返回",
                     color = Anidock.Text3,
                     style = MaterialTheme.typography.labelSmall,
                 )

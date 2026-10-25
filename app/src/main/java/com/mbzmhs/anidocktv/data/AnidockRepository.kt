@@ -27,6 +27,7 @@ class AnidockRepository(
     private val dao: AnimeDao,
     private val settingDao: SettingDao,
     private val downloadDao: DownloadTaskDao,
+    private val posDao: PlaybackPosDao,
 ) {
     private val http = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -566,6 +567,39 @@ class AnidockRepository(
 
     /** 番剧最后一次成功打开播放的集(详情页标记用);没记录返回 0。 */
     suspend fun lastOpenedEpisode(animeId: Long): Float = dao.byAnidockId(animeId)?.lastOpenedEpisode ?: 0f
+
+    // ---------- 播放进度(续播) ----------
+
+    /** 某集的播放进度;无记录返回 null。 */
+    suspend fun playbackPos(animeId: Long, episode: Float): PlaybackPosEntity? = posDao.byKey(animeId, episode)
+
+    /**
+     * 记录播放进度(播放器退出时回传):接近片尾(看完)清除记录,下次从头;
+     * 离开点太早(<5 秒)不落记录——调用方在选择续播选项时已清掉旧记录,秒退后回到"无记录从头播"。
+     */
+    suspend fun savePlaybackPos(animeId: Long, episode: Float, fileRelPath: String, positionMs: Long, lengthMs: Long) {
+        if (lengthMs > 0 && positionMs >= lengthMs - 15_000) {
+            posDao.delete(animeId, episode)
+            android.util.Log.d("AnidockTV", "pos: 看完清除 anime=$animeId ep=$episode")
+            return
+        }
+        if (positionMs < 5_000) {
+            android.util.Log.d("AnidockTV", "pos: 离开点太早不记录 anime=$animeId ep=$episode pos=${positionMs}ms")
+            return
+        }
+        posDao.upsert(
+            PlaybackPosEntity(
+                anidockId = animeId, episode = episode, fileRelPath = fileRelPath,
+                positionMs = positionMs, lengthMs = lengthMs, updatedAt = System.currentTimeMillis(),
+            )
+        )
+        android.util.Log.d("AnidockTV", "pos: 记录 anime=$animeId ep=$episode file=${fileRelPath.takeLast(40)} pos=${positionMs / 1000}s/${lengthMs / 1000}s")
+    }
+
+    /** 清除某集续播记录(用户在续播对话框做出选择/换文件播放即放弃旧记录)。 */
+    suspend fun clearPlaybackPos(animeId: Long, episode: Float) {
+        posDao.delete(animeId, episode)
+    }
 
     /** 记录用户成功打开播放某集(封面胶囊"上次看到n")。番剧不在本地则建最小行。 */
     suspend fun recordLastOpened(animeId: Long, episode: Float) {

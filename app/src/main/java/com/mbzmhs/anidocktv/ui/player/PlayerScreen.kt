@@ -100,9 +100,24 @@ fun PlayerScreen(
     onClose: () -> Unit,
     /** 流场景的真实网络速度采样(字节/秒,如引擎 BT 任务速度);不提供时回退 libvlc 媒体统计。 */
     speedSampler: (suspend () -> Long)? = null,
+    /** 续播起点(毫秒,>0 时等媒体就绪即跳);详情页续播对话框传入。 */
+    startAtMs: Long = 0,
+    /** 退出时回传最后播放位置(时间/时长),供续播记录;null=不记录。 */
+    onExitPosition: ((positionMs: Long, lengthMs: Long) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val controller = remember(source) { VlcPlayerController(context.applicationContext) }
+
+    // 打开播放器的那次按键(剧集单击/文件列表播放键)不泄漏进播放器:首次组合时
+    // LaunchedEffect 以当前 seq 立即触发一次,长按确认会被误判成"长按=弹菜单"。
+    val openedSeq = remember { keyHit.seq }
+
+    // 视频 Surface 挂载完成标记:开播必须晚于 attachViews(播放先于 Surface 挂载启动,
+    // vout 建立会偶发失败 → 黑屏有声;Surface 就绪后重开即恢复)。
+    var surfaceReady by remember { mutableStateOf(false) }
+
+    // 待跳起点(续播起点/切解码后原地续播):拿到时长(媒体就绪)即跳,跳完清零
+    var pendingSeekMs by remember { mutableStateOf(startAtMs) }
 
     var section by remember { mutableStateOf<MenuSection?>(null) }
     var menuIdx by remember { mutableIntStateOf(0) }
@@ -221,6 +236,15 @@ fun PlayerScreen(
             add(MenuRow("画面比例:${SCALE_OPTIONS.firstOrNull { it.first == controller.scaleType }?.second ?: "自适应"}") {
                 openSection(MenuSection.SCALE)
             })
+            // 解码模式循环:硬件直渲 → 硬件无直渲(黑屏自愈档,10bit HEVC 用)→ 软件(老编码兜底)。
+            // 切换后原地续播
+            add(MenuRow("解码:${decodeName(com.mbzmhs.anidocktv.player.VlcEngine.decodeMode)}(确认切换)") {
+                val keep = controller.timeMs
+                com.mbzmhs.anidocktv.player.VlcEngine.decodeMode = (com.mbzmhs.anidocktv.player.VlcEngine.decodeMode + 1) % 3
+                controller.open(source)
+                pendingSeekMs = keep
+                closeMenu(); pulseHud()
+            })
         }
         MenuSection.AUDIO -> trackRows(controller.audioTracks, controller.audioTrackId) { controller.setAudioTrack(it) } +
                 listOf(
@@ -284,10 +308,38 @@ fun PlayerScreen(
         }
     }
 
-    BackHandler { if (section != null) backFromMenu() else onClose() }
+    fun exitPlayer() {
+        // 退出即上报最后位置(看完/中途退出都算),续播记录由调用方落库
+        onExitPosition?.invoke(controller.timeMs, controller.lengthMs)
+        onClose()
+    }
+
+    BackHandler { if (section != null) backFromMenu() else exitPlayer() }
 
     LaunchedEffect(keyHit.seq) {
-        if (keyHit.seq > 0) onKey(keyHit.key, keyHit.longPress)
+        if (keyHit.seq > 0 && keyHit.seq > openedSeq) onKey(keyHit.key, keyHit.longPress)
+    }
+
+    // 待跳起点落地:媒体就绪(拿到时长)即跳;稍等播放起步,避免 seek 被开场状态吞掉
+    LaunchedEffect(controller.lengthMs, pendingSeekMs) {
+        if (pendingSeekMs in 1 until controller.lengthMs) {
+            val target = pendingSeekMs
+            delay(300)
+            controller.seekTo(target)
+            pendingSeekMs = 0
+        }
+    }
+
+    // 黑屏自愈看门狗:播放进行中(时间在走)但视频输出从未建立超过 6 秒 → 原地重开一次。
+    // vout/Surface 偶发竞态(与硬软解无关,重开即恢复),最多自愈 2 次,之后交人工(菜单切解码)。
+    var voutRetry by remember(source) { mutableStateOf(0) }
+    LaunchedEffect(controller.playing, controller.voutCount, controller.timeMs, voutRetry) {
+        if (voutRetry < 2 && controller.playing && controller.voutCount == 0 && controller.timeMs > 6_000) {
+            voutRetry++
+            val keep = controller.timeMs
+            controller.open(source)
+            pendingSeekMs = keep
+        }
     }
 
     // 边下边播:每秒采样真实下载速度(调用方注入引擎任务速度;libvlc 统计实测常为 0 只作回退)
@@ -301,9 +353,9 @@ fun PlayerScreen(
         }
     }
 
-    // 播放结束:稍候自动退出回详情页
+    // 播放结束:稍候自动退出回详情页(结束时位置≈片尾,续播记录会被清掉,下次从头)
     LaunchedEffect(controller.ended) {
-        if (controller.ended) { delay(500); onClose() }
+        if (controller.ended) { delay(500); exitPlayer() }
     }
 
     // 边下边播的"未就绪"是正常生命周期(引擎在抓头尾元数据/连 peer),不弹错误面板:
@@ -322,7 +374,7 @@ fun PlayerScreen(
         // 用 View.post 保证;attachViews 一次性,重组不重复。
         AndroidView(
             modifier = Modifier.fillMaxSize(),
-            factory = { ctx -> VLCVideoLayout(ctx).also { l -> l.post { controller.attachTo(l) } } },
+            factory = { ctx -> VLCVideoLayout(ctx).also { l -> l.post { controller.attachTo(l); surfaceReady = true } } },
         )
 
         // 缓冲转圈:流场景失败期间也维持转圈(未就绪是正常生命周期,交给后台无限重试)
@@ -491,8 +543,11 @@ fun PlayerScreen(
         }
     }
 
+    // 开播:等视频 Surface 挂载完成才 open(见 surfaceReady 注释);退出时卸载+释放
+    LaunchedEffect(surfaceReady) {
+        if (surfaceReady) controller.open(source)
+    }
     DisposableEffect(controller) {
-        controller.open(source)
         onDispose {
             // 先主线程卸载画面,再后台线程停止/释放(stop 会阻塞等播放线程退出)
             controller.detachViews()
@@ -543,6 +598,13 @@ private fun OutlinedText(
         Text(text, color = Color.Black, fontSize = fontSize, overflow = overflow, style = strokeStyle)
         Text(text, color = color, fontSize = fontSize, overflow = overflow)
     }
+}
+
+/** 解码模式名(菜单显示)。 */
+private fun decodeName(mode: Int): String = when (mode) {
+    1 -> "硬件无直渲"
+    2 -> "软件"
+    else -> "硬件直渲"
 }
 
 private fun fmtTime(ms: Long): String {

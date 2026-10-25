@@ -238,8 +238,10 @@ private fun DlTaskRow(t: DownloadTaskView, focused: Boolean) {
     }
 }
 
+/** 集标签:负键(含 -1)=合集(区间解析归详情页按钮,侧边栏只标"合集")。 */
 private fun epLabel(ep: Float): String =
-    if (ep == ep.toLong().toFloat()) "· 第${ep.toLong()}集" else "· 第${ep}集"
+    if (ep < 0f) "· 合集"
+    else if (ep == ep.toLong().toFloat()) "· 第${ep.toLong()}集" else "· 第${ep}集"
 
 private fun fmtSpeed(bps: Long): String = when {
     bps >= 1048576 -> "%.1f MB/s".format(bps / 1048576.0)

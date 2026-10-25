@@ -46,11 +46,14 @@ class MainActivity : ComponentActivity() {
 
     /** 内置播放器会话:source=播放源(本地文件/引擎边下边播环回流);onStopped=退出播放时的回调
      *  (边下边播用它停流,让引擎立刻还原纯下载优先级;本地播放为 null);
-     *  speedSampler=真实下载速度采样(字节/秒,引擎 BT 任务速度,供播放器缓冲/信息条显示)。 */
+     *  speedSampler=真实下载速度采样(字节/秒,引擎 BT 任务速度,供播放器缓冲/信息条显示);
+     *  startAtMs=续播起点(详情页续播对话框传入);onExitPosition=退出时回传位置(续播记录)。 */
     private class PlayerSession(
         val source: PlaybackSource,
         val onStopped: (() -> Unit)? = null,
         val speedSampler: (suspend () -> Long)? = null,
+        val startAtMs: Long = 0,
+        val onExitPosition: ((Long, Long) -> Unit)? = null,
     )
     private val playerSession = mutableStateOf<PlayerSession?>(null)
 
@@ -217,10 +220,14 @@ class MainActivity : ComponentActivity() {
                             keyHit = keyHit,
                             fromFollowed = (tab == HomeTab.FOLLOWED),
                             active = playerSession.value == null,   // 播放器覆盖期间详情页不消费按键
-                            onPlayFile = { file, label ->
-                                playerSession.value = PlayerSession(PlaybackSource.LocalFile(file.absolutePath, label))
+                            onPlayFile = { file, label, startAtMs, savePos ->
+                                playerSession.value = PlayerSession(
+                                    source = PlaybackSource.LocalFile(file.absolutePath, label),
+                                    startAtMs = startAtMs,
+                                    onExitPosition = savePos,
+                                )
                             },
-                            onPlayStream = { taskId, url, label ->
+                            onPlayStream = { taskId, url, label, startAtMs, savePos ->
                                 playerSession.value = PlayerSession(
                                     source = PlaybackSource.HttpStream(url, label),
                                     onStopped = { scope.launch { com.mbzmhs.anidocktv.data.EngineService.stopStream(taskId) } },
@@ -229,6 +236,8 @@ class MainActivity : ComponentActivity() {
                                         com.mbzmhs.anidocktv.data.EngineService.listTasks()
                                             .firstOrNull { it.id == taskId }?.speed ?: 0L
                                     },
+                                    startAtMs = startAtMs,
+                                    onExitPosition = savePos,
                                 )
                             },
                         )
@@ -243,6 +252,8 @@ class MainActivity : ComponentActivity() {
                                 playerSession.value = null
                             },
                             speedSampler = s.speedSampler,
+                            startAtMs = s.startAtMs,
+                            onExitPosition = s.onExitPosition,
                         )
                     }
                 }
