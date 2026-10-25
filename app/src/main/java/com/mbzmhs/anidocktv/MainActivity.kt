@@ -47,13 +47,15 @@ class MainActivity : ComponentActivity() {
     /** 内置播放器会话:source=播放源(本地文件/引擎边下边播环回流);onStopped=退出播放时的回调
      *  (边下边播用它停流,让引擎立刻还原纯下载优先级;本地播放为 null);
      *  speedSampler=真实下载速度采样(字节/秒,引擎 BT 任务速度,供播放器缓冲/信息条显示);
-     *  startAtMs=续播起点(详情页续播对话框传入);onExitPosition=退出时回传位置(续播记录)。 */
+     *  startAtMs=续播起点(详情页续播对话框传入);onExitPosition=退出时回传位置(续播记录);
+     *  extras=选集/自动连播上下文(详情页注入;播放器内换源=整体替换本会话)。 */
     private class PlayerSession(
         val source: PlaybackSource,
         val onStopped: (() -> Unit)? = null,
         val speedSampler: (suspend () -> Long)? = null,
         val startAtMs: Long = 0,
         val onExitPosition: ((Long, Long) -> Unit)? = null,
+        val extras: com.mbzmhs.anidocktv.player.PlayerExtras? = null,
     )
     private val playerSession = mutableStateOf<PlayerSession?>(null)
 
@@ -220,14 +222,15 @@ class MainActivity : ComponentActivity() {
                             keyHit = keyHit,
                             fromFollowed = (tab == HomeTab.FOLLOWED),
                             active = playerSession.value == null,   // 播放器覆盖期间详情页不消费按键
-                            onPlayFile = { file, label, startAtMs, savePos ->
+                            onPlayFile = { file, label, startAtMs, savePos, extras ->
                                 playerSession.value = PlayerSession(
                                     source = PlaybackSource.LocalFile(file.absolutePath, label),
                                     startAtMs = startAtMs,
                                     onExitPosition = savePos,
+                                    extras = extras,
                                 )
                             },
-                            onPlayStream = { taskId, url, label, startAtMs, savePos ->
+                            onPlayStream = { taskId, url, label, startAtMs, savePos, extras ->
                                 playerSession.value = PlayerSession(
                                     source = PlaybackSource.HttpStream(url, label),
                                     onStopped = { scope.launch { com.mbzmhs.anidocktv.data.EngineService.stopStream(taskId) } },
@@ -238,6 +241,7 @@ class MainActivity : ComponentActivity() {
                                     },
                                     startAtMs = startAtMs,
                                     onExitPosition = savePos,
+                                    extras = extras,
                                 )
                             },
                         )
@@ -254,6 +258,18 @@ class MainActivity : ComponentActivity() {
                             speedSampler = s.speedSampler,
                             startAtMs = s.startAtMs,
                             onExitPosition = s.onExitPosition,
+                            extras = s.extras,
+                            onSwitchSource = { sw ->
+                                // 播放器内换源(选集/自动连播):整体替换会话,播放器保留控制器原地续播
+                                playerSession.value = PlayerSession(
+                                    source = sw.source,
+                                    onStopped = sw.onStopped,
+                                    speedSampler = sw.speedSampler,
+                                    startAtMs = sw.startAtMs,
+                                    onExitPosition = sw.onExitPosition,
+                                    extras = sw.extras,
+                                )
+                            },
                         )
                     }
                 }

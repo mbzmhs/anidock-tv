@@ -73,6 +73,9 @@ class AnidockRepository(
     /** 某番剧的下载任务列表(详情页剧集按钮状态)。 */
     suspend fun downloadTasks(animeId: Long): List<DownloadTaskEntity> = downloadDao.byAnime(animeId)
 
+    /** 回写同步候选状态集:SYNC_DL_STATUS + completed(合集改选会把已完成任务重新激活)。 */
+    private val SYNC_TARGET_STATUS = SYNC_DL_STATUS + setOf("completed")
+
     /**
      * 开始下载某来源:服务器一般给种子文件链接 → 引擎 HTTP 引擎下载 .torrent(多线程+全局代理,
      * 拉完由 syncDownloadTasks 建 BT;磁链直接建 BT),保存目录 = 下载根目录/番剧名,关联落库。
@@ -176,15 +179,16 @@ class AnidockRepository(
      *  同步范围含 error 行:引擎侧出错任务可能被治愈(如待机杀引擎后人工/自动 resume 续传),
      *  不把它纳入回写,详情页会永远显示"出错"而任务实际在跑。 */
     suspend fun syncDownloadTasks(animeId: Long) {
-        val active = downloadDao.byAnime(animeId).filter { it.taskId.isNotEmpty() && it.status in SYNC_DL_STATUS }
+        val active = downloadDao.byAnime(animeId).filter { it.taskId.isNotEmpty() && it.status in SYNC_TARGET_STATUS }
         if (active.isEmpty()) return
         val n = syncTaskRows(active)
         android.util.Log.d("AnidockTV", "sync: 活跃行=${active.size} 回写=$n")
     }
 
-    /** 全部需回写任务回写引擎进度(侧边栏 3s 轮询调用,含 error 自愈行);引擎未运行时 listTasks 返回空,保持本地状态。 */
+    /** 全部需回写任务回写引擎进度(侧边栏 3s 轮询调用,含 error 自愈行与 completed 改选激活行);
+     *  引擎未运行时 listTasks 返回空,保持本地状态。 */
     suspend fun syncAllDownloadTasks() {
-        val rows = downloadDao.syncable()
+        val rows = downloadDao.syncCandidates()
         if (rows.isEmpty()) return
         syncTaskRows(rows)
     }
@@ -244,22 +248,28 @@ class AnidockRepository(
             }
             // BT 任务(含 choosing=多文件合集待选文件):choosing 行回写后剧集按钮显示"待选文件",
             // 单击/长按可进合集文件列表对话框(chooseFiles 落定后引擎转 waiting 开始下载)。
-            // BT 产物:引擎直写最终目录,completed 即最终态,无需搬文件
+            // 合集改选也会把"已完成"任务重新激活(completed→paused→running),所以完成行也在
+            // 回写目标集内;仅在有变化时落库,避免大量完成行每 3 秒空写
             val done = if (t.kind == "bt" && t.arrived > 0) t.arrived else t.downloaded
             val st = mapZdlStatus(t.status)
             val progress = if (st == "completed") 1f else if (t.size > 0) (done.toFloat() / t.size).coerceIn(0f, 1f) else 0f
-            downloadDao.upsert(
-                r.copy(
-                    status = st,
-                    progress = progress,
-                    size = t.size,
-                    downloaded = done,
-                    speed = t.speed,
-                    fileName = t.filename.ifBlank { r.fileName },
-                    updatedAt = now,
+            val newFileName = t.filename.ifBlank { r.fileName }
+            val changed = r.status != st || r.size != t.size || r.downloaded != done ||
+                r.speed != t.speed || r.fileName != newFileName
+            if (changed) {
+                downloadDao.upsert(
+                    r.copy(
+                        status = st,
+                        progress = progress,
+                        size = t.size,
+                        downloaded = done,
+                        speed = t.speed,
+                        fileName = newFileName,
+                        updatedAt = now,
+                    )
                 )
-            )
-            updated++
+                updated++
+            }
         }
         return updated
     }

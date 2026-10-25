@@ -31,6 +31,18 @@ object VlcEngine {
      */
     @Volatile var decodeMode: Int = 0
 
+    /**
+     * 进程级唯一 MediaPlayer(官方 App 同构:播放器随服务活整个进程,只换媒体不销毁实例)。
+     * 实测本机直渲下反复创建/释放播放器会滞留 MediaCodec 实例,循环播放几十次即占满
+     * 电视硬解通道(全系统播放器都起不来,需重启电视恢复)。
+     */
+    @Volatile private var sharedPlayer: MediaPlayer? = null
+    @Volatile internal var viewsOwner: Any? = null   // 当前占用视频画面的控制器(换会话校验,防串扰)
+
+    fun player(context: Context): MediaPlayer = sharedPlayer ?: synchronized(this) {
+        sharedPlayer ?: MediaPlayer(get(context)).also { sharedPlayer = it }
+    }
+
     fun get(context: Context): LibVLC = lib ?: synchronized(this) {
         lib ?: LibVLC(
             context.applicationContext,
@@ -58,7 +70,8 @@ data class ChapterRow(val index: Int, val name: String, val timeOffsetMs: Long)
  */
 class VlcPlayerController(context: Context) {
     private val vlc = VlcEngine.get(context)
-    val player = MediaPlayer(vlc)
+    /** 进程级共享播放器(见 VlcEngine.player 注释):控制器只是会话包装,不持有独立实例。 */
+    val player = VlcEngine.player(context)
 
     // ---- 播放状态(事件驱动) ----
     var playing by mutableStateOf(false)
@@ -109,8 +122,6 @@ class VlcPlayerController(context: Context) {
     /** 当前视频输出数(0=画面未建立,黑屏看门狗的判定依据)。 */
     var voutCount by mutableIntStateOf(0)
         private set
-
-    private var viewsAttached = false
 
     /** 本媒体会话是否已完成字幕自动选择(每个媒体一次,之后用户手动换轨不被覆盖)。 */
     private var autoSubDone = false
@@ -310,23 +321,33 @@ class VlcPlayerController(context: Context) {
     }
 
     fun attachTo(layout: VLCVideoLayout) {
-        if (viewsAttached) return
-        viewsAttached = true
+        if (VlcEngine.viewsOwner === this) return
+        VlcEngine.viewsOwner = this
         // textureView=true:视频走 TextureView 的 GL vout,字幕在 VLC 自己的 shader 里与视频
         // 合成——绕开"native 字幕层→安卓位图"路径的预乘缺陷(ASS 阴影/半透明描边会出白边)。
         player.attachViews(layout, null, true, true)
     }
 
-    /** 卸载画面(主线程);播放器关闭流程:先本方法,再 [shutdown]。 */
+    /** 卸载画面(主线程);非本控制器的画面(新会话已挂载)不动。 */
     fun detachViews() {
-        if (!viewsAttached) return
-        viewsAttached = false
+        if (VlcEngine.viewsOwner !== this) return
+        VlcEngine.viewsOwner = null
         runCatching { player.detachViews() }
     }
 
-    /** 停止并释放播放器实例。会阻塞等播放线程退出,必须在后台线程调用;LibVLC 单例保留复用。 */
-    fun shutdown() {
-        runCatching { player.stop() }
-        runCatching { player.release() }
+    /**
+     * 会话关闭(后台线程发起):stop 当前媒体(阻塞等播放线程退出,解码器随输入拆除回收)
+     * → 主线程卸画面。播放器实例进程级复用(见 VlcEngine.player),从不 release——
+     * 反复建/释实例在本机直渲下会滞留 MediaCodec,占满硬解通道。
+     * 新会话已接管画面(viewsOwner 换人)时本会话不再 stop,避免误停新会话的播放。
+     */
+    fun shutdownAsync() {
+        val main = android.os.Handler(android.os.Looper.getMainLooper())
+        Thread {
+            if (VlcEngine.viewsOwner === this) {
+                runCatching { player.stop() }
+            }
+            main.post { runCatching { detachViews() } }
+        }.start()
     }
 }

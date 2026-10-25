@@ -520,6 +520,21 @@ object EngineService {
         }
     }
 
+    /** 边下边播预热:把同任务指定文件(下一集)的头/尾元数据 piece 并入最高优先级,不切换播放会话。 */
+    suspend fun warmStream(taskId: String, file: String) {
+        runCatching {
+            withContext(Dispatchers.IO) {
+                val body = json.encodeToString(JsonObject.serializer(), buildJsonObject {
+                    put("file", kotlinx.serialization.json.JsonPrimitive(file))
+                }).toRequestBody()
+                val resp = client.newCall(
+                    Request.Builder().url(base() + "/api/tasks/" + taskId + "/stream/warm").post(body).build()
+                ).execute()
+                resp.close()
+            }
+        }.onFailure { Log.w(TAG, "engine: 预热失败 $taskId", it) }
+    }
+
     /** 停止边下边播,还原纯下载优先级(播放器退出时调用;不调引擎也会在 5 分钟空闲后自动回收)。 */
     suspend fun stopStream(taskId: String) {
         runCatching {

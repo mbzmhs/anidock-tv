@@ -47,6 +47,11 @@ interface DownloadTaskDao {
     @Query("SELECT * FROM downloadTask WHERE status IN ('fetching','creating','choosing','queued','downloading','seeding','paused','moving','error') ORDER BY createdAt DESC")
     suspend fun syncable(): List<DownloadTaskEntity>
 
+    /** 回写同步候选全集:syncable + completed——合集改选可把已完成任务重新激活
+     *  (completed→paused→running),完成行也必须持续回写,否则界面永远停在旧完成态。 */
+    @Query("SELECT * FROM downloadTask WHERE status IN ('fetching','creating','choosing','queued','downloading','seeding','paused','moving','error','completed') ORDER BY createdAt DESC")
+    suspend fun syncCandidates(): List<DownloadTaskEntity>
+
     /** 全部行(清理文件已丢的 completed 幽灵用)。 */
     @Query("SELECT * FROM downloadTask")
     suspend fun all(): List<DownloadTaskEntity>

@@ -14,9 +14,12 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Surface
@@ -29,6 +32,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -42,14 +46,21 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.mbzmhs.anidocktv.player.ChapterRow
 import com.mbzmhs.anidocktv.player.PlaybackSource
+import com.mbzmhs.anidocktv.player.PlayerEpisode
+import com.mbzmhs.anidocktv.player.PlayerExtras
+import com.mbzmhs.anidocktv.player.PlayerSwitch
 import com.mbzmhs.anidocktv.player.TrackRow
 import com.mbzmhs.anidocktv.player.VlcPlayerController
 import com.mbzmhs.anidocktv.ui.theme.Anidock
 import com.mbzmhs.anidocktv.ui.tv.K
 import com.mbzmhs.anidocktv.ui.tv.KeyHit
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import org.videolan.libvlc.MediaPlayer
 import org.videolan.libvlc.util.VLCVideoLayout
+
+/** 自动连播开关(进程级,播放菜单可切,默认开)。 */
+private val autoNextEnabled = mutableStateOf(true)
 
 private const val HUD_AUTO_HIDE_MS = 3_000L
 
@@ -64,7 +75,7 @@ private fun seekLadderMs(idx: Int): Long =
 private val K_MENU = Key(android.view.KeyEvent.KEYCODE_MENU)
 
 /** 菜单分区:主菜单与各二级列表(外挂字幕从字幕菜单进入)。 */
-private enum class MenuSection { MAIN, AUDIO, SUBTITLE, SUB_FILE, VIDEO, CHAPTER, RATE, SCALE }
+private enum class MenuSection { MAIN, EPISODES, AUDIO, SUBTITLE, SUB_FILE, VIDEO, CHAPTER, RATE, SCALE }
 
 /** 菜单行:mark=当前生效项(✓);run=null 表示纯提示行(不可选)。 */
 private class MenuRow(val text: String, val mark: Boolean = false, val action: (() -> Unit)? = null)
@@ -104,9 +115,15 @@ fun PlayerScreen(
     startAtMs: Long = 0,
     /** 退出时回传最后播放位置(时间/时长),供续播记录;null=不记录。 */
     onExitPosition: ((positionMs: Long, lengthMs: Long) -> Unit)? = null,
+    /** 选集/自动连播上下文(宿主注入;null=无选集能力,菜单不显示选集)。 */
+    extras: PlayerExtras? = null,
+    /** 切换播放目标(选集/自动连播):宿主替换整个会话,播放器保留控制器原地换源。 */
+    onSwitchSource: (PlayerSwitch) -> Unit = {},
 ) {
     val context = LocalContext.current
-    val controller = remember(source) { VlcPlayerController(context.applicationContext) }
+    // 控制器不随 source 重建:选集/自动连播换源时保留 vout/Surface,原地 open 平滑切换
+    val controller = remember { VlcPlayerController(context.applicationContext) }
+    val pScope = rememberCoroutineScope()
 
     // 打开播放器的那次按键(剧集单击/文件列表播放键)不泄漏进播放器:首次组合时
     // LaunchedEffect 以当前 seq 立即触发一次,长按确认会被误判成"长按=弹菜单"。
@@ -121,7 +138,8 @@ fun PlayerScreen(
 
     var section by remember { mutableStateOf<MenuSection?>(null) }
     var menuIdx by remember { mutableIntStateOf(0) }
-    var subFiles by remember { mutableStateOf<List<java.io.File>>(emptyList()) }
+    // 外挂字幕浏览:当前目录(起始=subLoadDir,可进子目录;返回不越过起始目录)
+    var subDir by remember(source) { mutableStateOf<java.io.File?>(null) }
     var hudSeq by remember { mutableIntStateOf(0) }
     var hudVisible by remember { mutableStateOf(false) }
     var seekToast by remember { mutableStateOf<String?>(null) }
@@ -133,17 +151,34 @@ fun PlayerScreen(
     var seekBaseMs by remember { mutableLongStateOf(0L) }
     var seekArmTick by remember { mutableIntStateOf(0) }
 
+    // 选集列表(打开选集菜单时取一次;不可播目标选中后刷新重取)
+    var epItems by remember { mutableStateOf<List<PlayerEpisode>?>(null) }
+    var epLoadTick by remember { mutableIntStateOf(0) }
+    LaunchedEffect(epLoadTick) {
+        if (epLoadTick > 0 && extras != null) {
+            epItems = runCatching { extras.listEpisodes() }.getOrNull()
+        }
+    }
+
     fun pulseHud() { hudSeq++ }
     LaunchedEffect(hudSeq) { hudVisible = true; delay(HUD_AUTO_HIDE_MS); hudVisible = false }
     LaunchedEffect(seekToast) { if (seekToast != null) { delay(800); seekToast = null } }
 
     fun closeMenu() { section = null; menuIdx = 0 }
 
+    // 外挂字幕目录:本地文件=视频同目录;边下边播=源或选集上下文给的任务下载目录(流无同目录概念)
+    val subLoadDir: java.io.File? = when (source) {
+        is PlaybackSource.LocalFile -> java.io.File(source.path).parentFile
+        is PlaybackSource.HttpStream -> (source.subtitleDir ?: extras?.subtitleDir)?.let { java.io.File(it) }
+    }
+
     fun openSection(s: MenuSection) {
         if (s == MenuSection.SUB_FILE) {
-            val dir = (source as? PlaybackSource.LocalFile)?.let { java.io.File(it.path).parentFile }
-            subFiles = dir?.listFiles { f -> f.isFile && f.extension.lowercase() in SUB_EXTS }
-                ?.sortedBy { it.name } ?: emptyList()
+            subDir = subLoadDir
+        }
+        if (s == MenuSection.EPISODES) {
+            epItems = null
+            epLoadTick++
         }
         controller.refreshSnapshot()
         section = s
@@ -221,8 +256,41 @@ fun PlayerScreen(
     fun trackRows(rows: List<TrackRow>, curId: Int, apply: (Int) -> Unit): List<MenuRow> =
         rows.map { t -> MenuRow(t.name, t.id == curId) { apply(t.id); closeMenu(); pulseHud() } }
 
+    /** 选集行:当前播放 ✓;未下载/不可播为纯提示行(灰显不可选);可选行确认后换源。 */
+    fun episodeRows(items: List<PlayerEpisode>): List<MenuRow> = items.map { e ->
+        val text = e.label + if (e.sub.isNotBlank()) "  ·  ${e.sub}" else ""
+        MenuRow(
+            text, mark = e.current,
+            action = if (e.enabled) {
+                {
+                    pScope.launch {
+                        val sw = runCatching { extras?.playEpisode?.invoke(e.id) }.getOrNull()
+                        if (sw != null) {
+                            closeMenu()
+                            // 换源前先回传当前进度(选集跳走也算一次播放退出)
+                            onExitPosition?.invoke(controller.timeMs, controller.lengthMs)
+                            onSwitchSource(sw)
+                        } else {
+                            epItems = null; epLoadTick++   // 状态已变(如刚建任务),刷新列表
+                        }
+                    }
+                }
+            } else null,
+        )
+    }
+
     fun buildRows(sec: MenuSection): List<MenuRow> = when (sec) {
+        MenuSection.EPISODES -> when (val items = epItems) {
+            null -> listOf(MenuRow("加载中…"))
+            else -> if (items.isEmpty()) listOf(MenuRow("没有可选集")) else episodeRows(items)
+        }
         MenuSection.MAIN -> buildList {
+            if (extras != null) {
+                add(MenuRow("选集") { openSection(MenuSection.EPISODES) })
+                add(MenuRow("自动连播:${if (autoNextEnabled.value) "开" else "关"}(播完接下一集)") {
+                    autoNextEnabled.value = !autoNextEnabled.value
+                })
+            }
             val audioName = controller.audioTracks.firstOrNull { it.id == controller.audioTrackId }?.name
             val spuName = controller.spuTracks.firstOrNull { it.id == controller.spuTrackId }?.name
             val videoName = controller.videoTracks.firstOrNull { it.id == controller.videoTrackId }?.name
@@ -254,15 +322,37 @@ fun PlayerScreen(
         MenuSection.SUBTITLE ->
             listOf(MenuRow("关闭字幕", controller.spuTrackId == -1) { controller.setSpuTrack(-1); closeMenu() }) +
                     trackRows(controller.spuTracks, controller.spuTrackId) { controller.setSpuTrack(it) } +
-                    (if (source is PlaybackSource.LocalFile)
+                    (if (subLoadDir != null)
                         listOf(MenuRow("加载外挂字幕…") { openSection(MenuSection.SUB_FILE) }) else emptyList()) +
                     listOf(
                         MenuRow("字幕延迟 -0.1秒(当前 ${fmtDelay(controller.spuDelayMs)})") { controller.adjustSpuDelay(-100) },
                         MenuRow("字幕延迟 +0.1秒") { controller.adjustSpuDelay(100) },
                     )
-        MenuSection.SUB_FILE ->
-            if (subFiles.isEmpty()) listOf(MenuRow("未找到外挂字幕(与视频同目录的 srt/ass/ssa/vtt)"))
-            else subFiles.map { f -> MenuRow(f.name) { controller.addSubtitle(f.absolutePath); closeMenu() } }
+        MenuSection.SUB_FILE -> {
+            val dir = subDir
+            when (dir) {
+                null -> listOf(MenuRow("加载中…"))
+                else -> {
+                    val entries = dir.listFiles().orEmpty()
+                        .filter { it.isDirectory || (it.isFile && it.extension.lowercase() in SUB_EXTS) }
+                        .sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
+                    // 向上返回:上界=下载根目录(extras.subtitleRoot),起始目录即上界时不可再上
+                    val subRoot = extras?.subtitleRoot?.let { java.io.File(it) } ?: subLoadDir
+                    val canUp = dir.parentFile != null && subRoot != null &&
+                        dir.absolutePath != subRoot.absolutePath && dir.absolutePath.startsWith(subRoot.absolutePath)
+                    val upRows = if (canUp) {
+                        listOf(MenuRow("‹ 返回上级") { subDir = dir.parentFile; menuIdx = 0 })
+                    } else emptyList()
+                    val entryRows = entries.map { f ->
+                        if (f.isDirectory) MenuRow("▸ ${f.name}/") { subDir = f; menuIdx = 0 }
+                        else MenuRow(f.name) { controller.addSubtitle(f.absolutePath); closeMenu() }
+                    }
+                    if (upRows.isEmpty() && entryRows.isEmpty())
+                        listOf(MenuRow("未找到外挂字幕(srt/ass/ssa/vtt/sub/smi/sup)"))
+                    else upRows + entryRows
+                }
+            }
+        }
         MenuSection.VIDEO -> trackRows(controller.videoTracks, controller.videoTrackId) { controller.setVideoTrack(it) }
         MenuSection.CHAPTER -> controller.chapters.map { c: ChapterRow ->
             MenuRow("${fmtTime(c.timeOffsetMs)}  ${c.name}", c.index == controller.chapterIdx) {
@@ -353,9 +443,20 @@ fun PlayerScreen(
         }
     }
 
-    // 播放结束:稍候自动退出回详情页(结束时位置≈片尾,续播记录会被清掉,下次从头)
+    // 播放结束:自动连播下一个(菜单可关,默认开;无下一目标/关闭时)稍候退出回详情页。
+    // 结束时位置≈片尾,回传后续播记录被清(看完),下次从头
     LaunchedEffect(controller.ended) {
-        if (controller.ended) { delay(500); exitPlayer() }
+        if (!controller.ended) return@LaunchedEffect
+        delay(800)
+        if (autoNextEnabled.value && extras?.autoNext != null) {
+            val sw = runCatching { extras.autoNext?.invoke() }.getOrNull()
+            if (sw != null) {
+                onExitPosition?.invoke(controller.timeMs, controller.lengthMs)
+                onSwitchSource(sw)
+                return@LaunchedEffect
+            }
+        }
+        exitPlayer()
     }
 
     // 边下边播的"未就绪"是正常生命周期(引擎在抓头尾元数据/连 peer),不弹错误面板:
@@ -506,13 +607,19 @@ fun PlayerScreen(
             }
         }
 
-        // 菜单覆盖层(样式对齐详情页 SourcePick/EpMenu)
+        // 菜单覆盖层(样式对齐详情页 SourcePick/EpMenu);行列表限高+可滚(选集/章节等长列表),
+        // 焦点行自动滚进可见区
         section?.let { sec ->
             val rows = buildRows(sec)
             if (menuIdx >= rows.size) menuIdx = (rows.size - 1).coerceAtLeast(0)
+            val menuListState = rememberLazyListState()
+            LaunchedEffect(menuIdx, rows.size, sec) {
+                if (menuIdx in 0 until rows.size) runCatching { menuListState.animateScrollToItem(menuIdx) }
+            }
             MenuPanel(
                 title = when (sec) {
                     MenuSection.MAIN -> "播放菜单"
+                    MenuSection.EPISODES -> "选集"
                     MenuSection.AUDIO -> "音轨"
                     MenuSection.SUBTITLE -> "字幕"
                     MenuSection.SUB_FILE -> "外挂字幕"
@@ -522,37 +629,65 @@ fun PlayerScreen(
                     MenuSection.SCALE -> "画面比例"
                 },
             ) {
-                rows.forEachIndexed { i, row ->
-                    val selected = i == menuIdx
-                    Box(
-                        Modifier.fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 1.dp)
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(if (selected) Anidock.Accent.copy(alpha = 0.25f) else Color.Transparent)
-                            .border(1.dp, if (selected) Anidock.Accent else Color.Transparent, RoundedCornerShape(6.dp)),
-                    ) {
-                        Text(
-                            (if (row.mark) "✓ " else "") + row.text + (if (selected && row.action != null) "  ▸" else ""),
-                            color = if (row.action == null) Anidock.Text3 else Anidock.Text,
-                            fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
-                        )
-                    }
+                LazyColumn(
+                    state = menuListState,
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 430.dp),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp),
+                ) {
+                    items(rows.size) { i -> MenuRowItem(rows[i], selected = i == menuIdx) }
                 }
             }
         }
     }
 
-    // 开播:等视频 Surface 挂载完成才 open(见 surfaceReady 注释);退出时卸载+释放
-    LaunchedEffect(surfaceReady) {
-        if (surfaceReady) controller.open(source)
+    // 开播/换源:等视频 Surface 挂载完成才 open(见 surfaceReady 注释);选集/自动连播由宿主
+    // 替换会话(source 变),控制器保留原地换源,不重建画面;换源同时重置待跳起点/快进档
+    var openedSource by remember { mutableStateOf<PlaybackSource?>(null) }
+    LaunchedEffect(source, surfaceReady) {
+        if (!surfaceReady) return@LaunchedEffect
+        if (openedSource != source) {
+            openedSource = source
+            pendingSeekMs = startAtMs
+            seekLevel = 0
+            seekArmed = false
+            controller.open(source)
+        }
     }
     DisposableEffect(controller) {
         onDispose {
-            // 先主线程卸载画面,再后台线程停止/释放(stop 会阻塞等播放线程退出)
-            controller.detachViews()
-            Thread { controller.shutdown() }.start()
+            // 关闭顺序:stop → 卸画面 → release(直渲下乱序会滞留硬解实例,见 shutdownAsync 注释)
+            controller.shutdownAsync()
         }
+    }
+
+    // 下一集预热:播放超过 90% 时把下一个目标(同任务合集文件)头/尾元数据并入最高优先级,
+    // 只预热一次;跨任务(单集场景)引擎不支持,宿主不给 warmNext 即跳过
+    var warmed by remember(source) { mutableStateOf(false) }
+    LaunchedEffect(controller.timeMs, controller.lengthMs, source) {
+        val len = controller.lengthMs
+        if (!warmed && len > 0 && controller.timeMs * 10 >= len * 9 && extras?.warmNext != null) {
+            warmed = true
+            runCatching { extras.warmNext?.invoke() }
+        }
+    }
+}
+
+/** 菜单行:选中高亮描边;run=null 的纯提示行灰显(action==null 即无动作)。 */
+@Composable
+private fun MenuRowItem(row: MenuRow, selected: Boolean) {
+    Box(
+        Modifier.fillMaxWidth()
+            .padding(vertical = 1.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .background(if (selected) Anidock.Accent.copy(alpha = 0.25f) else Color.Transparent)
+            .border(1.dp, if (selected) Anidock.Accent else Color.Transparent, RoundedCornerShape(6.dp)),
+    ) {
+        Text(
+            (if (row.mark) "✓ " else "") + row.text + (if (selected && row.action != null) "  ▸" else ""),
+            color = if (row.action == null) Anidock.Text3 else Anidock.Text,
+            fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
+        )
     }
 }
 
