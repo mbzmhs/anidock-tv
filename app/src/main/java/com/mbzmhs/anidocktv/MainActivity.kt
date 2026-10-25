@@ -211,10 +211,11 @@ class MainActivity : ComponentActivity() {
                                 extras = extras,
                             )
                         },
-                        onPlayFile = { file, label ->
-                            // 侧边栏文件列表播放已下完的文件:本地播放
+                        onPlayFile = { file, label, extras ->
+                            // 侧边栏文件列表播放已下完的文件:本地播放(同样带选集上下文)
                             playerSession.value = PlayerSession(
                                 source = PlaybackSource.LocalFile(file.absolutePath, label),
+                                extras = extras,
                             )
                         },
                         keyHit = keyHit,

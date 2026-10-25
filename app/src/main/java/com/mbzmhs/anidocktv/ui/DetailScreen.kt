@@ -1239,7 +1239,7 @@ private fun EpMenuOverlay(menu: EpMenu, idx: Int) {
         ) {
             Column(Modifier.padding(vertical = 8.dp)) {
                 Text(
-                    "第${menu.ep.episode.toEpText()}集",
+                    if (menu.ep.episodeTo != null) epBtnText(menu.ep) else "第${menu.ep.episode.toEpText()}集",
                     color = Anidock.Text3,
                     style = MaterialTheme.typography.labelMedium,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),

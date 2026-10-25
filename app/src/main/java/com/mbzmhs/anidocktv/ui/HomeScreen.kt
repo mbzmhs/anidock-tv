@@ -86,8 +86,8 @@ fun HomeScreen(
     onSettings: () -> Unit,
     /** 合集文件列表里直接边下边播(侧边栏任务进入;播引擎环回流,由 MainActivity 建播放会话) */
     onPlayStream: (taskId: String, url: String, label: String, extras: com.mbzmhs.anidocktv.player.PlayerExtras?) -> Unit = { _, _, _, _ -> },
-    /** 文件列表播放时目标文件已下完 → 本地播放(侧边栏入口) */
-    onPlayFile: (file: java.io.File, label: String) -> Unit = { _, _ -> },
+    /** 文件列表播放时目标文件已下完 → 本地播放(侧边栏入口;带选集上下文) */
+    onPlayFile: (file: java.io.File, label: String, extras: com.mbzmhs.anidocktv.player.PlayerExtras?) -> Unit = { _, _, _ -> },
     keyHit: KeyHit,
 ) {
     // 从当前 tab 的 filters 解出字段,便于下方沿用原变量名;翻页/侧边栏改动都经 onFilters(filters.copy(...)) 回写
@@ -552,7 +552,7 @@ fun HomeScreen(
                         } else null
                         val extras = bld.buildExtras(row.episode, path, row.taskId, subtitleDirOf(row.fileDir, row.fileName))
                         if (local != null) {
-                            onPlayFile(local, listOf(t?.title, name).filterNotNull().filter { it.isNotBlank() }.joinToString(" "))
+                            onPlayFile(local, listOf(t?.title, name).filterNotNull().filter { it.isNotBlank() }.joinToString(" "), extras)
                         } else {
                             val gen = System.currentTimeMillis() / 1000
                             onPlayStream(
@@ -599,7 +599,7 @@ private fun TaskMenuOverlay(menu: DownloadTaskView, idx: Int) {
         ) {
             Column(Modifier.padding(vertical = 8.dp)) {
                 Text(
-                    "${menu.title} 第${epText(menu.episode)}集",
+                    "${menu.title} " + (if (menu.episode < 0f) "合集" else "第${epText(menu.episode)}集"),
                     color = Anidock.Text3,
                     style = MaterialTheme.typography.labelMedium,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
