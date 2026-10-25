@@ -312,7 +312,9 @@ class VlcPlayerController(context: Context) {
     fun attachTo(layout: VLCVideoLayout) {
         if (viewsAttached) return
         viewsAttached = true
-        player.attachViews(layout, null, true, false)
+        // textureView=true:视频走 TextureView 的 GL vout,字幕在 VLC 自己的 shader 里与视频
+        // 合成——绕开"native 字幕层→安卓位图"路径的预乘缺陷(ASS 阴影/半透明描边会出白边)。
+        player.attachViews(layout, null, true, true)
     }
 
     /** 卸载画面(主线程);播放器关闭流程:先本方法,再 [shutdown]。 */

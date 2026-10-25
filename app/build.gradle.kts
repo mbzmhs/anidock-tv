@@ -3,12 +3,13 @@ plugins {
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.devtools.ksp")
-    kotlin("plugin.serialization") version "2.0.20"
+    kotlin("plugin.serialization") version "2.2.20"
 }
 
 android {
     namespace = "com.mbzmhs.anidocktv"
-    compileSdk = 35
+    // 36:libvlc 3.7.3+ 的 AAR 要求 minCompileSdk=36(工具链已随其升级到 Kotlin 2.2/AGP 8.9)
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.mbzmhs.anidocktv"
@@ -33,7 +34,7 @@ android {
 }
 
 dependencies {
-    implementation(platform("androidx.compose:compose-bom:2024.09.02"))
+    implementation(platform("androidx.compose:compose-bom:2025.09.01"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     debugImplementation("androidx.compose.ui:ui-tooling")
@@ -46,21 +47,21 @@ dependencies {
     implementation("androidx.tv:tv-foundation:1.0.0")
     implementation("androidx.tv:tv-material:1.1.0")
 
-    // Room:本地存储(追番/番剧缓存/剧集/下载任务)
-    implementation("androidx.room:room-runtime:2.6.1")
-    implementation("androidx.room:room-ktx:2.6.1")
-    ksp("androidx.room:room-compiler:2.6.1")
+    // Room:本地存储(追番/番剧缓存/剧集/下载任务);2.7 配 KSP2(Kotlin 2.2 工具链)
+    implementation("androidx.room:room-runtime:2.7.2")
+    implementation("androidx.room:room-ktx:2.7.2")
+    ksp("androidx.room:room-compiler:2.7.2")
 
     // 网络 + JSON
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
     // 图片(Coil,Compose)
     implementation("io.coil-kt:coil-compose:2.7.0")
 
-    // 内置播放器核心:libVLC Android 绑定稳定线,内核 3.0.x 最新稳定;so 由 abiFilters 过滤。
-    // 选 3.7.2:3.7.3+ 的 AAR 要求 minCompileSdk=36 且依赖 kotlin-stdlib 2.2(需升整条工具链),
-    // 3.7.2 是不升工具链能用的最新版(2026 年中发布,内核为 3.0.24 一线)。
-    implementation("org.videolan.android:libvlc-all:3.7.2")
+    // 内置播放器核心:libVLC Android 绑定稳定线最新(内核 3.0.x 最新,so 由 abiFilters 过滤)。
+    // 3.7.7 的 AAR 要求 minCompileSdk=36 且依赖 kotlin-stdlib 2.2——工具链已随之升级
+    // (Kotlin 2.2.20/AGP 8.9/Compose BOM 2025.09),运行端 minSdk 26 不受影响(安卓9 可用)。
+    implementation("org.videolan.android:libvlc-all:3.7.7")
 }

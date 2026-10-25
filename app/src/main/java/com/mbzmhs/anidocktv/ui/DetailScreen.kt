@@ -143,9 +143,9 @@ private fun resolveVideoFile(file: java.io.File): java.io.File? {
 }
 
 /**
- * 下载完成后打开文件:ACTION_VIEW 交给系统分发给可用播放器(Kodi/系统视频应用)。
- * - 共享存储(/storage、/sdcard,含 U 盘)直接 file:// 路径:Kodi 对 content URI
- *   有 _onNewIntent 崩溃 bug(19.0 实测),file:// 是它最稳的入口;本进程已关闭
+ * 下载完成后打开文件:ACTION_VIEW 交给系统分发给可用播放器(系统视频应用/外部播放器)。
+ * - 共享存储(/storage、/sdcard,含 U 盘)直接 file:// 路径:外部播放器对 content URI
+ *   可能有 _onNewIntent 崩溃 bug(实测),file:// 是最稳的入口;本进程已关闭
  *   StrictMode 的 file URI 外发检查(文件在共享存储,无真实泄露);
  * - 应用私有目录走 FileProvider 换 content URI;
  * - 下载结果是目录(BT 多文件)时取其中字典序第一个视频文件。
