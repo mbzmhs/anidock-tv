@@ -512,6 +512,28 @@ fun PlayerScreen(
             }
         }
 
+        // 系统时钟(左上角,与右侧"已暂停"同款样式):随底部信息条(进度条)同显同隐——
+        // 进页/按键/改进度时短暂出现;暂停时与"已暂停"角标一起常显,方便随时抬头看时间
+        val clockVisible = (hudVisible || (!controller.playing && !controller.ended)) &&
+                controller.lengthMs > 0 && controller.failed == null
+        if (clockVisible) {
+            var clockText by remember { mutableStateOf("") }
+            LaunchedEffect(Unit) {
+                val fmt = java.time.format.DateTimeFormatter.ofPattern("HH:mm")
+                while (true) {
+                    clockText = java.time.LocalTime.now().format(fmt)
+                    delay(1_000)
+                }
+            }
+            Surface(
+                color = Color.Black.copy(alpha = 0.55f),
+                shape = RoundedCornerShape(6.dp),
+                modifier = Modifier.align(Alignment.TopStart).padding(20.dp),
+            ) {
+                Text(clockText, color = Anidock.Text, fontSize = 14.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
+            }
+        }
+
         // 暂停角标(常显,区别于缓冲/出错)
         if (!controller.playing && !controller.ended && controller.failed == null && controller.lengthMs > 0) {
             Surface(
