@@ -43,9 +43,14 @@ interface DownloadTaskDao {
     @Query("SELECT * FROM downloadTask WHERE anidockId = :animeId ORDER BY episode ASC")
     suspend fun byAnime(animeId: Long): List<DownloadTaskEntity>
 
-    /** 侧边栏展示 + 同步回写目标集:进行中 + error 行——error 行可能已在引擎侧自愈续传。 */
-    @Query("SELECT * FROM downloadTask WHERE status IN ('fetching','creating','queued','downloading','seeding','paused','moving','error') ORDER BY createdAt DESC")
+    /** 侧边栏展示 + 同步回写目标集:进行中(含合集 choosing 待选文件)+ error 行——error 行可能已在引擎侧自愈续传。 */
+    @Query("SELECT * FROM downloadTask WHERE status IN ('fetching','creating','choosing','queued','downloading','seeding','paused','moving','error') ORDER BY createdAt DESC")
     suspend fun syncable(): List<DownloadTaskEntity>
+
+    /** 回写同步候选全集:syncable + completed——合集改选可把已完成任务重新激活
+     *  (completed→paused→running),完成行也必须持续回写,否则界面永远停在旧完成态。 */
+    @Query("SELECT * FROM downloadTask WHERE status IN ('fetching','creating','choosing','queued','downloading','seeding','paused','moving','error','completed') ORDER BY createdAt DESC")
+    suspend fun syncCandidates(): List<DownloadTaskEntity>
 
     /** 全部行(清理文件已丢的 completed 幽灵用)。 */
     @Query("SELECT * FROM downloadTask")
@@ -80,7 +85,7 @@ data class DownloadTaskView(
     val task: DownloadTaskEntity,
     val title: String,
 ) {
-    val status: String get() = task.status          // queued / downloading / seeding / paused
+    val status: String get() = task.status          // queued / choosing / downloading / seeding / paused
     val episode: Float get() = task.episode
     val progress: Float get() = task.progress
     val speed: Long get() = task.speed

@@ -27,6 +27,7 @@ class AnidockRepository(
     private val dao: AnimeDao,
     private val settingDao: SettingDao,
     private val downloadDao: DownloadTaskDao,
+    private val posDao: PlaybackPosDao,
 ) {
     private val http = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -72,6 +73,9 @@ class AnidockRepository(
     /** 某番剧的下载任务列表(详情页剧集按钮状态)。 */
     suspend fun downloadTasks(animeId: Long): List<DownloadTaskEntity> = downloadDao.byAnime(animeId)
 
+    /** 回写同步候选状态集:SYNC_DL_STATUS + completed(合集改选会把已完成任务重新激活)。 */
+    private val SYNC_TARGET_STATUS = SYNC_DL_STATUS + setOf("completed")
+
     /**
      * 开始下载某来源:服务器一般给种子文件链接 → 引擎 HTTP 引擎下载 .torrent(多线程+全局代理,
      * 拉完由 syncDownloadTasks 建 BT;磁链直接建 BT),保存目录 = 下载根目录/番剧名,关联落库。
@@ -107,14 +111,11 @@ class AnidockRepository(
             val title = anime.title.ifBlank { "anime${anime.id}" }
             // 引擎直接下最终目录(去私有工作区):dir = 下载根目录/<番剧名>
             val dir = File(Services.downloadDir, title).apply { mkdirs() }
-            // 换源/重下:同一集之前的文件先删(成片+半成品+种子 .torrent),旧源文件不会被子任务覆盖
+            // 换源/重下:同一集之前的文件先删(成片+半成品+种子 .torrent;合集=整目录树),
+            // 旧源文件不会被子任务覆盖
             runCatching {
                 for (old in downloadDao.byAnime(anime.id).filter { it.episode == ep }) {
-                    if (old.fileName.isNotBlank()) {
-                        File(old.fileDir, old.fileName).delete()
-                        File(old.fileDir, old.fileName + ".zdl.part").delete()
-                        File(old.fileDir, old.fileName + ".!zd").delete()
-                    }
+                    deleteEpisodeFiles(old.fileDir, old.fileName)
                 }
             }
             // 占位行:状态 fetching。整个生命周期被状态机盖住,后续重复点击被查重拦下。
@@ -178,15 +179,16 @@ class AnidockRepository(
      *  同步范围含 error 行:引擎侧出错任务可能被治愈(如待机杀引擎后人工/自动 resume 续传),
      *  不把它纳入回写,详情页会永远显示"出错"而任务实际在跑。 */
     suspend fun syncDownloadTasks(animeId: Long) {
-        val active = downloadDao.byAnime(animeId).filter { it.taskId.isNotEmpty() && it.status in SYNC_DL_STATUS }
+        val active = downloadDao.byAnime(animeId).filter { it.taskId.isNotEmpty() && it.status in SYNC_TARGET_STATUS }
         if (active.isEmpty()) return
         val n = syncTaskRows(active)
         android.util.Log.d("AnidockTV", "sync: 活跃行=${active.size} 回写=$n")
     }
 
-    /** 全部需回写任务回写引擎进度(侧边栏 3s 轮询调用,含 error 自愈行);引擎未运行时 listTasks 返回空,保持本地状态。 */
+    /** 全部需回写任务回写引擎进度(侧边栏 3s 轮询调用,含 error 自愈行与 completed 改选激活行);
+     *  引擎未运行时 listTasks 返回空,保持本地状态。 */
     suspend fun syncAllDownloadTasks() {
-        val rows = downloadDao.syncable()
+        val rows = downloadDao.syncCandidates()
         if (rows.isEmpty()) return
         syncTaskRows(rows)
     }
@@ -244,28 +246,30 @@ class AnidockRepository(
                 updated++
                 continue
             }
-            // 多文件种子(choosing):anidock 源不支持,直接报错删任务+文件
-            if (t.status == "choosing") {
-                failChoosingTask(r, t.id)
-                updated++
-                continue
-            }
-            // BT 任务:引擎直写最终目录,completed 即最终态,无需搬文件
+            // BT 任务(含 choosing=多文件合集待选文件):choosing 行回写后剧集按钮显示"待选文件",
+            // 单击/长按可进合集文件列表对话框(chooseFiles 落定后引擎转 waiting 开始下载)。
+            // 合集改选也会把"已完成"任务重新激活(completed→paused→running),所以完成行也在
+            // 回写目标集内;仅在有变化时落库,避免大量完成行每 3 秒空写
             val done = if (t.kind == "bt" && t.arrived > 0) t.arrived else t.downloaded
             val st = mapZdlStatus(t.status)
             val progress = if (st == "completed") 1f else if (t.size > 0) (done.toFloat() / t.size).coerceIn(0f, 1f) else 0f
-            downloadDao.upsert(
-                r.copy(
-                    status = st,
-                    progress = progress,
-                    size = t.size,
-                    downloaded = done,
-                    speed = t.speed,
-                    fileName = t.filename.ifBlank { r.fileName },
-                    updatedAt = now,
+            val newFileName = t.filename.ifBlank { r.fileName }
+            val changed = r.status != st || r.size != t.size || r.downloaded != done ||
+                r.speed != t.speed || r.fileName != newFileName
+            if (changed) {
+                downloadDao.upsert(
+                    r.copy(
+                        status = st,
+                        progress = progress,
+                        size = t.size,
+                        downloaded = done,
+                        speed = t.speed,
+                        fileName = newFileName,
+                        updatedAt = now,
+                    )
                 )
-            )
-            updated++
+                updated++
+            }
         }
         return updated
     }
@@ -350,16 +354,7 @@ class AnidockRepository(
     suspend fun cancelDownload(row: DownloadTaskEntity) {
         // 删引擎任务(file=1 连 .torrent 一并删);同集多行全删,不留任何 TV 行痕迹。
         if (row.taskId.isNotEmpty()) EngineService.deleteTask(row.taskId, true)
-        if (row.fileName.isNotBlank()) {
-            try {
-                // 引擎直写最终目录:删成片+半成品(.!zd/.zdl.part 兜底,引擎 running 分支靠协程 defer 未必删)。
-                // 删任务即删成片(用户已确认);同集换源留下的旧文件由换源清理兜底。
-                File(row.fileDir, row.fileName).delete()
-                File(row.fileDir, row.fileName + ".zdl.part").delete()
-                File(row.fileDir, row.fileName + ".!zd").delete()
-            } catch (_: Exception) {
-            }
-        }
+        deleteEpisodeFiles(row.fileDir, row.fileName)
         downloadDao.byAnime(row.anidockId).filter { it.episode == row.episode }
             .forEach { downloadDao.deleteRow(it.id) }
     }
@@ -371,25 +366,26 @@ class AnidockRepository(
         return EngineService.actionTask(row.taskId, action)
     }
 
-    /**
-     * 多文件种子(引擎 choosing 状态:元数据就绪,等用户选文件)。anidock 源只出
-     * 单文件种子,遇到多文件直接报错:标 error + 删引擎任务 + 删文件(workDir/
-     * finalDir 残留)。TV 行保留(error 态),用户可重新下载。
-     */
-    private suspend fun failChoosingTask(r: DownloadTaskEntity, taskId: String) {
-        if (taskId.isNotEmpty()) EngineService.deleteTask(taskId, true)
-        if (r.fileName.isNotBlank()) {
-            try {
-                if (r.fileDir.isNotBlank()) {
-                    java.io.File(r.fileDir, r.fileName).delete()
-                    java.io.File(r.fileDir, r.fileName + ".zdl.part").delete()
-                    java.io.File(r.fileDir, r.fileName + ".!zd").delete()
-                }
-            } catch (_: Exception) {
+    /** 递归删除文件/目录树(合集任务的产物是整个目录;单文件退化为普通删除)。 */
+    private fun deleteTree(f: File) {
+        if (f.isDirectory) f.listFiles()?.forEach { deleteTree(it) }
+        runCatching { f.delete() }
+    }
+
+    /** 删除某集的旧产物(换源重下/取消下载共用):合集=整目录树,单文件=成片+半成品。 */
+    private fun deleteEpisodeFiles(dir: String, fileName: String) {
+        if (dir.isBlank() || fileName.isBlank()) return
+        try {
+            val f = File(dir, fileName)
+            if (f.isDirectory) {
+                deleteTree(f)
+            } else {
+                f.delete()
+                File(dir, fileName + ".zdl.part").delete()
+                File(dir, fileName + ".!zd").delete()
             }
+        } catch (_: Exception) {
         }
-        downloadDao.upsert(r.copy(status = "error", speed = 0, updatedAt = System.currentTimeMillis()))
-        android.util.Log.w("AnidockTV", "choosing: 多文件种子不支持,已报错删任务 ${r.releaseTitle}")
     }
 
     /** 需展示/回写的任务(含番剧名),侧边栏任务列表用:进行中 + 出错(出错一目了然,可就地重试)。 */
@@ -469,7 +465,8 @@ class AnidockRepository(
     }
 
     private fun mapZdlStatus(s: String): String = when (s) {
-        "waiting", "choosing" -> "queued"
+        "waiting" -> "queued"
+        "choosing" -> "choosing"   // 多文件合集:元数据已就绪,等用户在文件列表里勾选
         "running" -> "downloading"
         "seeding" -> "seeding"
         "completed" -> "completed"
@@ -478,9 +475,10 @@ class AnidockRepository(
     }
 
     private companion object {
-        // 进行中全集:含占位的 fetching(拉种子)/creating(建任务)与搬文件的 moving。
+        // 进行中全集:含占位的 fetching(拉种子)/creating(建任务)、搬文件的 moving
+        // 与合集 choosing(待选文件;不算终态,查重需拦住重复建任务)。
         // 查重命中这些就不建新任务(注意:不含 error,失败的行不挡重试)。
-        val ACTIVE_DL_STATUS = setOf("fetching", "creating", "queued", "downloading", "seeding", "paused", "moving")
+        val ACTIVE_DL_STATUS = setOf("fetching", "creating", "choosing", "queued", "downloading", "seeding", "paused", "moving")
         // sync 回写目标集 = 进行中 + error(error 行可能已在引擎侧自愈续传,需把真实状态写回)。
         val SYNC_DL_STATUS = ACTIVE_DL_STATUS + "error"
     }
@@ -579,6 +577,39 @@ class AnidockRepository(
 
     /** 番剧最后一次成功打开播放的集(详情页标记用);没记录返回 0。 */
     suspend fun lastOpenedEpisode(animeId: Long): Float = dao.byAnidockId(animeId)?.lastOpenedEpisode ?: 0f
+
+    // ---------- 播放进度(续播) ----------
+
+    /** 某集的播放进度;无记录返回 null。 */
+    suspend fun playbackPos(animeId: Long, episode: Float): PlaybackPosEntity? = posDao.byKey(animeId, episode)
+
+    /**
+     * 记录播放进度(播放器退出时回传):接近片尾(看完)清除记录,下次从头;
+     * 离开点太早(<5 秒)不落记录——调用方在选择续播选项时已清掉旧记录,秒退后回到"无记录从头播"。
+     */
+    suspend fun savePlaybackPos(animeId: Long, episode: Float, fileRelPath: String, positionMs: Long, lengthMs: Long) {
+        if (lengthMs > 0 && positionMs >= lengthMs - 15_000) {
+            posDao.delete(animeId, episode)
+            android.util.Log.d("AnidockTV", "pos: 看完清除 anime=$animeId ep=$episode")
+            return
+        }
+        if (positionMs < 5_000) {
+            android.util.Log.d("AnidockTV", "pos: 离开点太早不记录 anime=$animeId ep=$episode pos=${positionMs}ms")
+            return
+        }
+        posDao.upsert(
+            PlaybackPosEntity(
+                anidockId = animeId, episode = episode, fileRelPath = fileRelPath,
+                positionMs = positionMs, lengthMs = lengthMs, updatedAt = System.currentTimeMillis(),
+            )
+        )
+        android.util.Log.d("AnidockTV", "pos: 记录 anime=$animeId ep=$episode file=${fileRelPath.takeLast(40)} pos=${positionMs / 1000}s/${lengthMs / 1000}s")
+    }
+
+    /** 清除某集续播记录(用户在续播对话框做出选择/换文件播放即放弃旧记录)。 */
+    suspend fun clearPlaybackPos(animeId: Long, episode: Float) {
+        posDao.delete(animeId, episode)
+    }
 
     /** 记录用户成功打开播放某集(封面胶囊"上次看到n")。番剧不在本地则建最小行。 */
     suspend fun recordLastOpened(animeId: Long, episode: Float) {

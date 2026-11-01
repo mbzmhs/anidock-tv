@@ -6,11 +6,19 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -31,6 +39,7 @@ import com.mbzmhs.anidocktv.ui.HomeScreen
 import com.mbzmhs.anidocktv.ui.HomeTab
 import com.mbzmhs.anidocktv.ui.SettingsScreen
 import com.mbzmhs.anidocktv.ui.player.PlayerScreen
+import com.mbzmhs.anidocktv.ui.theme.Anidock
 import com.mbzmhs.anidocktv.ui.theme.AnidockTheme
 
 /**
@@ -46,11 +55,16 @@ class MainActivity : ComponentActivity() {
 
     /** 内置播放器会话:source=播放源(本地文件/引擎边下边播环回流);onStopped=退出播放时的回调
      *  (边下边播用它停流,让引擎立刻还原纯下载优先级;本地播放为 null);
-     *  speedSampler=真实下载速度采样(字节/秒,引擎 BT 任务速度,供播放器缓冲/信息条显示)。 */
+     *  speedSampler=真实下载速度采样(字节/秒,引擎 BT 任务速度,供播放器缓冲/信息条显示);
+     *  startAtMs=续播起点(详情页续播对话框传入);onExitPosition=退出时回传位置(续播记录);
+     *  extras=选集/自动连播上下文(详情页注入;播放器内换源=整体替换本会话)。 */
     private class PlayerSession(
         val source: PlaybackSource,
         val onStopped: (() -> Unit)? = null,
         val speedSampler: (suspend () -> Long)? = null,
+        val startAtMs: Long = 0,
+        val onExitPosition: ((Long, Long) -> Unit)? = null,
+        val extras: com.mbzmhs.anidocktv.player.PlayerExtras? = null,
     )
     private val playerSession = mutableStateOf<PlayerSession?>(null)
 
@@ -101,6 +115,31 @@ class MainActivity : ComponentActivity() {
                 BackHandler(enabled = showSidebar && selectedAnimeId.value == null && !showSettings.value && playerSession.value == null) {
                     if (sidebarMode != "main") sidebarMode = "main"
                     else showSidebar = false
+                }
+
+                // 首页根层(侧边栏已关、无详情/设置/播放器)的返回键:两次确认退出。
+                // 首次提示"再次按返回键退出应用",1 秒内再按才退出;也是播放器楔死后
+                // "完全退出应用"提示所指的操作入口。
+                var exitArmAt by remember { mutableStateOf(0L) }
+                var exitToast by remember { mutableStateOf(false) }
+                BackHandler(enabled = !showSidebar && selectedAnimeId.value == null && !showSettings.value && !showEngineSettings.value && playerSession.value == null) {
+                    val now = android.os.SystemClock.uptimeMillis()
+                    if (now - exitArmAt <= 1_000L) {
+                        // 退出顺序:先停看门狗服务(否则它会把引擎再拉起、进程复活),再停引擎子进程,
+                        // 最后收尾杀进程(播放器原生线程/后台协程不残留)。引擎任务状态已持久,重开自动恢复。
+                        stopService(android.content.Intent(this@MainActivity, EngineWatchdogService::class.java))
+                        com.mbzmhs.anidocktv.data.EngineService.stop()
+                        finishAndRemoveTask()
+                        android.os.Process.killProcess(android.os.Process.myPid())
+                    } else {
+                        exitArmAt = now
+                        exitToast = true
+                        scope.launch {
+                            kotlinx.coroutines.delay(1_000L)
+                            // 期间未再按(未重新计时)才收起提示
+                            if (android.os.SystemClock.uptimeMillis() - exitArmAt >= 1_000L) exitToast = false
+                        }
+                    }
                 }
 
                 // 按键只在 Activity 最外层 onPreviewKeyEvent 可靠捕获(无焦点时事件只到根节点)。
@@ -194,6 +233,25 @@ class MainActivity : ComponentActivity() {
                         },
                         onFollow = { a, f -> scope.launch { Services.repo.setFollowed(a, f) } },
                         onSettings = { showSettings.value = true; showSidebar = false },
+                        onPlayStream = { taskId, url, label, extras ->
+                            // 侧边栏合集文件列表里点播:与详情页同一套播放会话(停流+速度采样+选集上下文)
+                            playerSession.value = PlayerSession(
+                                source = PlaybackSource.HttpStream(url, label),
+                                onStopped = { scope.launch { com.mbzmhs.anidocktv.data.EngineService.stopStream(taskId) } },
+                                speedSampler = {
+                                    com.mbzmhs.anidocktv.data.EngineService.listTasks()
+                                        .firstOrNull { it.id == taskId }?.speed ?: 0L
+                                },
+                                extras = extras,
+                            )
+                        },
+                        onPlayFile = { file, label, extras ->
+                            // 侧边栏文件列表播放已下完的文件:本地播放(同样带选集上下文)
+                            playerSession.value = PlayerSession(
+                                source = PlaybackSource.LocalFile(file.absolutePath, label),
+                                extras = extras,
+                            )
+                        },
                         keyHit = keyHit,
                     )
                     when {
@@ -206,10 +264,15 @@ class MainActivity : ComponentActivity() {
                             keyHit = keyHit,
                             fromFollowed = (tab == HomeTab.FOLLOWED),
                             active = playerSession.value == null,   // 播放器覆盖期间详情页不消费按键
-                            onPlayFile = { file, label ->
-                                playerSession.value = PlayerSession(PlaybackSource.LocalFile(file.absolutePath, label))
+                            onPlayFile = { file, label, startAtMs, savePos, extras ->
+                                playerSession.value = PlayerSession(
+                                    source = PlaybackSource.LocalFile(file.absolutePath, label),
+                                    startAtMs = startAtMs,
+                                    onExitPosition = savePos,
+                                    extras = extras,
+                                )
                             },
-                            onPlayStream = { taskId, url, label ->
+                            onPlayStream = { taskId, url, label, startAtMs, savePos, extras ->
                                 playerSession.value = PlayerSession(
                                     source = PlaybackSource.HttpStream(url, label),
                                     onStopped = { scope.launch { com.mbzmhs.anidocktv.data.EngineService.stopStream(taskId) } },
@@ -218,6 +281,9 @@ class MainActivity : ComponentActivity() {
                                         com.mbzmhs.anidocktv.data.EngineService.listTasks()
                                             .firstOrNull { it.id == taskId }?.speed ?: 0L
                                     },
+                                    startAtMs = startAtMs,
+                                    onExitPosition = savePos,
+                                    extras = extras,
                                 )
                             },
                         )
@@ -232,7 +298,35 @@ class MainActivity : ComponentActivity() {
                                 playerSession.value = null
                             },
                             speedSampler = s.speedSampler,
+                            startAtMs = s.startAtMs,
+                            onExitPosition = s.onExitPosition,
+                            extras = s.extras,
+                            onSwitchSource = { sw ->
+                                // 播放器内换源(选集/自动连播):整体替换会话,播放器保留控制器原地续播
+                                playerSession.value = PlayerSession(
+                                    source = sw.source,
+                                    onStopped = sw.onStopped,
+                                    speedSampler = sw.speedSampler,
+                                    startAtMs = sw.startAtMs,
+                                    onExitPosition = sw.onExitPosition,
+                                    extras = sw.extras,
+                                )
+                            },
                         )
+                    }
+                    // 退出确认提示(首页两次返回退出):置顶居中,1 秒后自动消失
+                    if (exitToast) {
+                        Surface(
+                            color = Color.Black.copy(alpha = 0.55f),
+                            shape = RoundedCornerShape(6.dp),
+                            modifier = Modifier.align(Alignment.Center),
+                        ) {
+                            Text(
+                                "再次按返回键退出应用",
+                                color = Anidock.Text, fontSize = 18.sp,
+                                modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
+                            )
+                        }
                     }
                 }
             }

@@ -80,27 +80,19 @@ private const val EP_GAP = 8
 
 private data class Tgt(val kind: Int, val ep: Int)
 
-/** 剧集按钮下载状态(status 直接透传 + none);row 携带文件位置供完成后打开。 */
-private data class EpDlInfo(val state: String, val progress: Float, val speed: Long, val row: DownloadTaskEntity? = null)
-
 private data class EpMenu(val ep: EpisodeView, val actions: List<String>)
 
-/** 某集的代表任务:活跃(拉种子/建任务/排队/下载/做种/暂停/搬文件)优先,其次完成,再次错误。 */
-private fun bestTask(ep: Float, tasks: List<DownloadTaskEntity>): DownloadTaskEntity? {
-    val mine = tasks.filter { it.episode == ep }
-    if (mine.isEmpty()) return null
-    return mine.firstOrNull { it.status in listOf("fetching", "creating", "queued", "downloading", "seeding", "paused", "moving") }
-        ?: mine.firstOrNull { it.status == "completed" }
-        ?: mine.firstOrNull { it.status == "error" }
-        ?: mine.firstOrNull()
+/** 某集的代表任务/视频扩展名/集数文案等共用 helpers 见 PlaybackExtras.kt(同包 internal)。 */
+
+/** 续播时间点展示(12:34 / 1:02:03)。 */
+private fun fmtPos(ms: Long): String {
+    val s = ms / 1000
+    return if (s >= 3600) "%d:%02d:%02d".format(s / 3600, s % 3600 / 60, s % 60)
+    else "%d:%02d".format(s / 60, s % 60)
 }
 
-private fun epDlInfo(ep: Float, tasks: List<DownloadTaskEntity>): EpDlInfo {
-    val r = bestTask(ep, tasks) ?: return EpDlInfo("none", 0f, 0)
-    return EpDlInfo(r.status, r.progress, r.speed, r)
-}
-
-private val VIDEO_EXTS = setOf("mp4", "m4v", "mkv", "avi", "mov", "ts", "flv", "wmv", "webm", "mpg", "mpeg")
+/** 续播选择对话框的一个选项:标题 + 副标题(时间点/文件名)+ 动作。 */
+private data class ResumeOpt(val title: String, val sub: String = "", val action: () -> Unit)
 
 private fun videoMime(name: String): String = when (name.substringAfterLast('.', "").lowercase()) {
     "mp4", "m4v" -> "video/mp4"
@@ -114,20 +106,22 @@ private fun videoMime(name: String): String = when (name.substringAfterLast('.',
 }
 
 /**
- * 下载产物定位为可直接播放的视频文件:目录(BT 多文件种子)取字典序第一个视频,
- * 单文件直接返回;不存在/无视频返回 null。
+ * 下载产物定位为可直接播放的视频文件:目录(BT 多文件种子/合集)递归取相对路径字典序
+ * 第一个视频(合集常有子目录),单文件直接返回;不存在/无视频返回 null。
  */
 private fun resolveVideoFile(file: java.io.File): java.io.File? {
     return if (file.isDirectory) {
-        file.listFiles { f -> f.isFile && f.length() > 0 && f.extension.lowercase() in VIDEO_EXTS }
-            ?.sortedBy { it.name }?.firstOrNull()
+        file.walkTopDown()
+            .filter { f -> f.isFile && f.length() > 0 && f.extension.lowercase() in VIDEO_EXTS }
+            .sortedBy { it.relativeTo(file).path }
+            .firstOrNull()
     } else if (file.isFile && file.length() > 0) file else null
 }
 
 /**
- * 下载完成后打开文件:ACTION_VIEW 交给系统分发给可用播放器(Kodi/系统视频应用)。
- * - 共享存储(/storage、/sdcard,含 U 盘)直接 file:// 路径:Kodi 对 content URI
- *   有 _onNewIntent 崩溃 bug(19.0 实测),file:// 是它最稳的入口;本进程已关闭
+ * 下载完成后打开文件:ACTION_VIEW 交给系统分发给可用播放器(系统视频应用/外部播放器)。
+ * - 共享存储(/storage、/sdcard,含 U 盘)直接 file:// 路径:外部播放器对 content URI
+ *   可能有 _onNewIntent 崩溃 bug(实测),file:// 是最稳的入口;本进程已关闭
  *   StrictMode 的 file URI 外发检查(文件在共享存储,无真实泄露);
  * - 应用私有目录走 FileProvider 换 content URI;
  * - 下载结果是目录(BT 多文件)时取其中字典序第一个视频文件。
@@ -135,9 +129,11 @@ private fun resolveVideoFile(file: java.io.File): java.io.File? {
  */
 private fun openDownloadedVideo(context: android.content.Context, file: java.io.File) {
     val target = if (file.isDirectory) {
-        val vids = file.listFiles { f -> f.isFile && f.length() > 0 && f.extension.lowercase() in VIDEO_EXTS }
-            ?.sortedBy { it.name }
-        if (vids.isNullOrEmpty()) throw IllegalStateException("目录里没有视频文件: ${file.path}")
+        val vids = file.walkTopDown()
+            .filter { f -> f.isFile && f.length() > 0 && f.extension.lowercase() in VIDEO_EXTS }
+            .sortedBy { it.relativeTo(file).path }
+            .toList()
+        if (vids.isEmpty()) throw IllegalStateException("目录里没有视频文件: ${file.path}")
         vids[0]
     } else {
         if (!file.exists()) throw IllegalStateException("文件不存在: ${file.path}")
@@ -174,8 +170,14 @@ fun DetailScreen(
     keyHit: KeyHit,
     fromFollowed: Boolean = false,
     active: Boolean = true,
-    onPlayFile: (file: java.io.File, label: String) -> Unit = { _, _ -> },
-    onPlayStream: (taskId: String, url: String, label: String) -> Unit = { _, _, _ -> },
+    onPlayFile: (
+        file: java.io.File, label: String, startAtMs: Long, savePos: ((Long, Long) -> Unit)?,
+        extras: com.mbzmhs.anidocktv.player.PlayerExtras?,
+    ) -> Unit = { _, _, _, _, _ -> },
+    onPlayStream: (
+        taskId: String, url: String, label: String, startAtMs: Long, savePos: ((Long, Long) -> Unit)?,
+        extras: com.mbzmhs.anidocktv.player.PlayerExtras?,
+    ) -> Unit = { _, _, _, _, _, _ -> },
 ) {
     BackHandler { onBack() }
     val context = LocalContext.current
@@ -201,11 +203,14 @@ fun DetailScreen(
     var sourceIdx by remember { mutableStateOf(0) }
     var epMenu by remember { mutableStateOf<EpMenu?>(null) }          // 长按菜单覆盖层
     var menuIdx by remember { mutableStateOf(0) }
+    var filesDlg by remember { mutableStateOf<String?>(null) }        // 合集文件列表对话框:引擎任务 id
+    var resumeMenu by remember { mutableStateOf<List<ResumeOpt>?>(null) }   // 续播选择覆盖层
+    var resumeIdx by remember { mutableStateOf(0) }
     val scope = rememberCoroutineScope()
 
-    // 覆盖层(来源选择/长按菜单)打开时 BACK 先关覆盖层
-    BackHandler(enabled = sourcePick != null || epMenu != null) {
-        if (sourcePick != null) sourcePick = null else epMenu = null
+    // 覆盖层(来源选择/长按菜单/续播选择)打开时 BACK 先关覆盖层
+    BackHandler(enabled = sourcePick != null || epMenu != null || resumeMenu != null) {
+        if (sourcePick != null) sourcePick = null else if (epMenu != null) epMenu = null else resumeMenu = null
     }
 
     val scrollState = rememberScrollState()
@@ -375,40 +380,150 @@ fun DetailScreen(
         }
     }
 
-    /** 边下边播:直接播引擎环回流。引擎按播放头 Range 重排 piece 优先级(先头尾元数据再顺序窗口),
-     *  v 代次隔离会话;打开即记"上次看到",与本地播放一致。 */
-    fun startStreamPlayback(ep: EpisodeView) {
-        val row = bestTask(ep.episode, dlTasks)
-        if (row == null || row.taskId.isBlank()) {
+    // 选集/连播上下文构建器(与侧边栏文件列表播放共用,见 PlaybackExtras.kt):
+    // title/episodes 传惰性读(委托状态),调用时取最新
+    val extrasBuilder = remember(animeId) {
+        PlaybackExtrasBuilder(scope, animeId, { anime?.title }, { episodes ?: emptyList() }, { lastOpened = it })
+    }
+
+    /** 实际发起播放:本地文件或引擎流(合集可指定种子内文件),并注入续播回写。 */
+    fun launchPlayback(
+        ep: EpisodeView,
+        localFile: java.io.File?,     // 非空=本地播放(已完成);null=引擎边下边播
+        taskId: String,
+        relPath: String?,             // 合集内文件(流的 file 参数/续播记录键)
+        fileName: String,             // 展示文件名(合集)
+        startAtMs: Long,
+        subDir: String,               // 外挂字幕起始目录(浏览上界=下载根目录)
+    ) {
+        lastOpened = ep.episode
+        scope.launch { Services.repo.recordLastOpened(animeId, ep.episode) }
+        val epTag = if (ep.episode > 0f) "第${ep.episode.toInt()}集" else "合集"
+        val namePart = if (fileName.isNotBlank()) listOf(fileName) else emptyList()
+        val savePos: (Long, Long) -> Unit = { t, len ->
+            scope.launch { Services.repo.savePlaybackPos(animeId, ep.episode, relPath ?: fileName, t, len) }
+        }
+        val swExtras = extrasBuilder.buildExtras(ep.episode, relPath, taskId, subDir)
+        if (localFile != null) {
+            onPlayFile(
+                localFile,
+                (listOf(a?.title, epTag) + namePart).filterNotNull().filter { it.isNotBlank() }.joinToString(" "),
+                startAtMs, savePos, swExtras,
+            )
+        } else {
+            val gen = System.currentTimeMillis() / 1000
+            val url = com.mbzmhs.anidocktv.data.EngineService.streamUrl(taskId, gen, relPath)
+            onPlayStream(
+                taskId, url,
+                (listOf(a?.title, epTag) + namePart + "边下边播").filterNotNull().filter { it.isNotBlank() }.joinToString(" "),
+                startAtMs, savePos, swExtras,
+            )
+        }
+    }
+
+    /**
+     * 单击播放统一入口(已完成=本地文件,下载中/做种=边下边播;单集与合集同口径):
+     * - 有续播记录:先弹选择——从上次位置继续(时间点,合集附文件名)/ 从头开始 /
+     *   (合集)从上次文件的头部播放;
+     * - 无记录:合集从第一个视频文件头部,单集从文件头,直接进播放器。
+     * 合集的目标文件经引擎 detail 的文件表精确定位(本地=目录下相对路径,流=file 参数)。
+     */
+    suspend fun openPlaybackWithResume(ep: EpisodeView, viaStream: Boolean) {
+        val row = bestTask(ep.episode, dlTasks) ?: return
+        if (row.taskId.isBlank() || row.fileDir.isBlank()) {
             Toast.makeText(context, "任务尚未建立,稍后再试", Toast.LENGTH_SHORT).show()
             return
         }
-        lastOpened = ep.episode
-        scope.launch { Services.repo.recordLastOpened(animeId, ep.episode) }
-        val gen = System.currentTimeMillis() / 1000
-        val url = com.mbzmhs.anidocktv.data.EngineService.streamUrl(row.taskId, gen)
-        val epTag = if (ep.episode > 0f) "第${ep.episode.toInt()}集" else "合集"
-        onPlayStream(
-            row.taskId, url,
-            listOf(a?.title, epTag, "边下边播").filterNotNull().filter { it.isNotBlank() }.joinToString(" "),
+        val files = com.mbzmhs.anidocktv.data.EngineService.taskDetail(row.taskId)?.files ?: emptyList()
+        val multi = files.size > 1
+        val first = if (multi) firstVideoOf(files) else null
+        val firstRel = first?.path?.joinToString("/")
+
+        /** 发起播放:relPath 非空=合集内指定文件。做出播放选择即放弃旧续播记录
+         *  (秒退也不再回到旧点);新记录在退出时按实际位置落。
+         *  目标文件已下完(任务在下载中但该文件完整)→ 本地播放,否则边下边播。 */
+        fun launch(relPath: String?, fileName: String, startAtMs: Long) {
+            scope.launch { Services.repo.clearPlaybackPos(animeId, ep.episode) }
+            val fileComplete = viaStream && relPath != null &&
+                files.firstOrNull { it.path.joinToString("/") == relPath }
+                    ?.let { it.size > 0 && it.done >= it.size } == true
+            if (viaStream && !fileComplete) {
+                launchPlayback(ep, null, row.taskId, relPath, fileName, startAtMs, subtitleDirOf(row.fileDir, row.fileName))
+            } else {
+                val target = relPath?.let {
+                    java.io.File(java.io.File(row.fileDir, row.fileName), it).takeIf { f -> f.exists() }
+                } ?: resolveVideoFile(java.io.File(row.fileDir, row.fileName))
+                if (target == null) {
+                    Toast.makeText(context, "下载目录里没有可播放的视频文件", Toast.LENGTH_SHORT).show()
+                } else {
+                    launchPlayback(ep, target, row.taskId, relPath, if (multi) fileName else "", startAtMs, subtitleDirOf(row.fileDir, row.fileName))
+                }
+            }
+        }
+
+        val pos = Services.repo.playbackPos(animeId, ep.episode)
+        if (pos == null) {
+            launch(firstRel, first?.path?.lastOrNull() ?: "", 0)
+            return
+        }
+        val posName = pos.fileRelPath.substringAfterLast('/')
+        val opts = mutableListOf(
+            ResumeOpt(
+                "从上次的位置继续",
+                fmtPos(pos.positionMs) + (if (multi && posName.isNotBlank()) " · $posName" else ""),
+            ) { launch(if (multi) pos.fileRelPath else null, if (multi) posName else "", pos.positionMs) },
+            ResumeOpt("从头开始播放", if (multi) "第一个文件" else "") {
+                launch(firstRel, first?.path?.lastOrNull() ?: "", 0)
+            },
         )
+        if (multi && posName.isNotBlank()) {
+            opts += ResumeOpt("从上次文件的头部播放", posName) { launch(pos.fileRelPath, posName, 0) }
+        }
+        resumeIdx = 0
+        resumeMenu = opts
     }
 
     /** 长按菜单:按当前下载状态给出不同操作。 */
     fun openEpMenu(ep: EpisodeView) {
         menuIdx = 0
         epMenu = EpMenu(ep, when (epDlInfo(ep.episode, dlTasks).state) {
-            // 下载中:短按已改为边下边播,暂停/继续收进长按菜单
-            "fetching", "creating", "queued", "downloading", "seeding", "moving" -> listOf("暂停下载", "取消下载")
-            "paused" -> listOf("继续下载", "取消下载")
-            "completed" -> listOf("重新下载(选来源)", "删除文件")
+            // 下载中:短按已改为边下边播,暂停/继续收进长按菜单;合集可随时进文件列表改选
+            "fetching", "creating", "queued", "downloading", "seeding", "moving" -> listOf("暂停下载", "文件列表", "取消下载")
+            "paused" -> listOf("继续下载", "文件列表", "取消下载")
+            "completed" -> listOf("文件列表", "重新下载(选来源)", "删除文件")
+            // 多文件合集:元数据就绪待选文件,进文件列表勾选后才开始下载
+            "choosing" -> listOf("选择文件", "取消下载")
             "error" -> listOf("重试", "取消下载")
             else -> listOf("下载(最优来源)", "选择来源下载")
         })
     }
 
+    /** 打开合集(多文件种子)文件列表对话框:勾选要下载的文件,视频可就地边下边播。 */
+    fun openFilesDialog(ep: EpisodeView) {
+        val row = bestTask(ep.episode, dlTasks)
+        if (row == null || row.taskId.isBlank()) {
+            Toast.makeText(context, "任务尚未建立,稍后再试", Toast.LENGTH_SHORT).show()
+            return
+        }
+        filesDlg = row.taskId
+    }
+
     suspend fun handleDetailKey(key: Key, longPress: Boolean) {
-        // 覆盖层打开时按键全归覆盖层,底层页面不响应
+        // 覆盖层打开时按键全归覆盖层,底层页面不响应(合集文件对话框自行消费按键)
+        if (filesDlg != null) return
+        resumeMenu?.let { opts ->
+            when (key) {
+                K.UP -> if (resumeIdx > 0) resumeIdx--
+                K.DOWN -> if (resumeIdx < opts.size - 1) resumeIdx++
+                K.CENTER, K.ENTER -> {
+                    val o = opts.getOrNull(resumeIdx)
+                    resumeMenu = null
+                    o?.action?.invoke()
+                }
+                else -> {}
+            }
+            return
+        }
         sourcePick?.let { ep ->
             val rels = listOf(ep.best) + ep.alternatives
             when (key) {
@@ -434,6 +549,7 @@ fun DetailScreen(
                             "下载(最优来源)" -> startEpDownload(ep, ep.best)
                             "重试" -> retryEpDownload(ep)
                             "选择来源下载", "重新下载(选来源)" -> { sourcePick = ep; sourceIdx = 0 }
+                            "选择文件", "文件列表" -> openFilesDialog(ep)
                             "暂停下载", "继续下载" -> pauseResumeEpDownload(ep)
                             "取消下载", "删除文件" -> deleteEpDownload(ep)
                         }
@@ -502,30 +618,18 @@ fun DetailScreen(
                         openEpMenu(ep)
                     } else {
                         // 单击按状态走:无文件=下载最优来源;出错=重试(优先续传,引擎侧任务没了才重下);
-                        // 下载中/排队/做种=边下边播(暂停走长按菜单);已暂停=继续;完成=内置播放器播放。
+                        // 下载中/排队/做种=边下边播、完成=本地播放,都走续播入口(有记录先弹选择,
+                        // 无记录合集从第一个文件头部/单集从头);已暂停=继续;合集 choosing=进文件列表;
                         // 删除只走长按菜单。
                         when (epDlInfo(ep.episode, dlTasks).state) {
                             "none" -> startEpDownload(ep, ep.best)
                             "error" -> retryEpDownload(ep)
-                            "queued", "downloading", "seeding" -> startStreamPlayback(ep)
+                            "choosing" -> openFilesDialog(ep)
+                            "queued", "downloading", "seeding" ->
+                                scope.launch { openPlaybackWithResume(ep, viaStream = true) }
                             "paused" -> pauseResumeEpDownload(ep)
-                            "completed" -> {
-                                val row = epDlInfo(ep.episode, dlTasks).row
-                                if (row == null || row.fileDir.isBlank() || row.fileName.isBlank()) {
-                                    Toast.makeText(context, "已完成但缺少文件记录", Toast.LENGTH_SHORT).show()
-                                } else {
-                                    val file = resolveVideoFile(java.io.File(row.fileDir, row.fileName))
-                                    if (file == null) {
-                                        Toast.makeText(context, "下载目录里没有可播放的视频文件", Toast.LENGTH_SHORT).show()
-                                    } else {
-                                        // 打开内置播放器即视为"上次看到"(与旧版外接播放器行为一致),立即刷新指示器并落库
-                                        lastOpened = ep.episode
-                                        scope.launch { Services.repo.recordLastOpened(animeId, ep.episode) }
-                                        val epTag = if (ep.episode > 0f) "第${ep.episode.toInt()}集" else "合集"
-                                        onPlayFile(file, listOf(a?.title, epTag).filterNotNull().filter { it.isNotBlank() }.joinToString(" "))
-                                    }
-                                }
-                            }
+                            "completed" ->
+                                scope.launch { openPlaybackWithResume(ep, viaStream = false) }
                             else -> {}
                         }
                     }
@@ -631,9 +735,60 @@ fun DetailScreen(
             }
         }
         }
-        // 覆盖层:选来源 / 长按菜单(暗幕 + 居中面板)
+        // 覆盖层:选来源 / 长按菜单 / 续播选择 / 合集文件列表(暗幕 + 居中面板)
         sourcePick?.let { ep -> SourcePickOverlay(ep = ep, idx = sourceIdx) }
         epMenu?.let { m -> EpMenuOverlay(menu = m, idx = menuIdx) }
+        resumeMenu?.let { opts -> ResumeOverlay(opts, resumeIdx) }
+        filesDlg?.let { tid ->
+            val row = dlTasks.firstOrNull { it.taskId == tid }
+            TorrentFilesOverlay(
+                taskId = tid,
+                title = listOf(
+                    a?.title,
+                    row?.let { r -> if (r.episode > 0f) "第${r.episode.toInt()}集" else "合集" },
+                ).filterNotNull().filter { it.isNotBlank() }.joinToString(" "),
+                keyHit = keyHit,
+                active = active,
+                onClose = { filesDlg = null; refreshDl() },
+                onPlayFile = { path, name ->
+                    // 合集内指定文件:该文件已下完→本地播放,否则边下边播(引擎按 file 参数切流会话)。
+                    // 同样记续播;换文件播放即放弃该集旧续播记录。
+                    filesDlg = null
+                    val ep = row?.episode ?: -1f
+                    lastOpened = ep
+                    scope.launch { Services.repo.recordLastOpened(animeId, ep) }
+                    scope.launch { Services.repo.clearPlaybackPos(animeId, ep) }
+                    val savePos: (Long, Long) -> Unit = { t, len ->
+                        scope.launch { Services.repo.savePlaybackPos(animeId, ep, path, t, len) }
+                    }
+                    val swExtras = extrasBuilder.buildExtras(ep, path, tid, row?.let { subtitleDirOf(it.fileDir, it.fileName) } ?: "")
+                    scope.launch {
+                        val d = com.mbzmhs.anidocktv.data.EngineService.taskDetail(tid)
+                        val complete = d?.status == "completed" ||
+                            d?.files?.firstOrNull { it.path.joinToString("/") == path }
+                                ?.let { it.size > 0 && it.done >= it.size } == true
+                        val local = if (complete && row != null && row.fileDir.isNotBlank() && row.fileName.isNotBlank()) {
+                            java.io.File(java.io.File(row.fileDir, row.fileName), path).takeIf { it.isFile && it.length() > 0 }
+                        } else null
+                        if (local != null) {
+                            onPlayFile(
+                                local,
+                                listOf(a?.title, name).filterNotNull().filter { it.isNotBlank() }.joinToString(" "),
+                                0, savePos, swExtras,
+                            )
+                        } else {
+                            val gen = System.currentTimeMillis() / 1000
+                            onPlayStream(
+                                tid,
+                                com.mbzmhs.anidocktv.data.EngineService.streamUrl(tid, gen, path),
+                                listOf(a?.title, name, "边下边播").filterNotNull().filter { it.isNotBlank() }.joinToString(" "),
+                                0, savePos, swExtras,
+                            )
+                        }
+                    }
+                },
+            )
+        }
     }
 }
 
@@ -800,7 +955,7 @@ private fun DetailHeader(
                                 rowList.forEachIndexed { c, ep ->
                                     val lin = r * cols + c
                                     EpisodeButton(
-                                        text = ep.episode.toEpText(),
+                                        text = epBtnText(ep),
                                         focused = focusIdx == epStart + lin,
                                         dl = epDlInfo(ep.episode, dlTasks),
                                         isLastWatched = lastOpened > 0f && ep.episode == lastOpened,
@@ -881,7 +1036,7 @@ private fun EpisodeButton(text: String, focused: Boolean, dl: EpDlInfo, isLastWa
         focused -> Anidock.Accent
         isLastWatched -> Color(0xFFE8862B)   // 上次看过=橙色边框(与封面"上次看到"胶囊同色)
         dl.state == "paused" -> Anidock.Accent2
-        dl.state in listOf("fetching", "creating", "queued", "downloading", "seeding", "moving", "completed") -> Anidock.Accent
+        dl.state in listOf("fetching", "creating", "queued", "choosing", "downloading", "seeding", "moving", "completed") -> Anidock.Accent
         else -> Anidock.BorderSoft
     }
     Box(
@@ -898,7 +1053,7 @@ private fun EpisodeButton(text: String, focused: Boolean, dl: EpDlInfo, isLastWa
         contentAlignment = Alignment.Center,
     ) {
         when (dl.state) {
-            "queued", "fetching", "creating", "moving" -> Box(Modifier.fillMaxSize().background(Anidock.Accent.copy(alpha = 0.10f)))
+            "queued", "fetching", "creating", "moving", "choosing" -> Box(Modifier.fillMaxSize().background(Anidock.Accent.copy(alpha = 0.10f)))
             "paused" -> Box(Modifier.fillMaxSize().background(Anidock.Accent2.copy(alpha = 0.22f)))
             "seeding" -> Box(Modifier.fillMaxSize().background(Anidock.Ok.copy(alpha = 0.16f)))
             // completed 不再填充底色:只用文字颜色区分(白=已下载,灰=未下载),更干净
@@ -923,6 +1078,7 @@ private fun EpisodeButton(text: String, focused: Boolean, dl: EpDlInfo, isLastWa
         val sub = when (dl.state) {
             "downloading" -> "${(dl.progress * 100f).toInt()}%"
             "queued" -> "排队中"
+            "choosing" -> "待选文件"
             "fetching" -> "拉种子中"
             "creating" -> "建任务中"
             "moving" -> "搬成片中"
@@ -931,6 +1087,8 @@ private fun EpisodeButton(text: String, focused: Boolean, dl: EpDlInfo, isLastWa
             "error" -> "出错"
             else -> null
         }
+        // 合集区间文案("1~14")比集号长,超宽时降字号塞进小按钮
+        val txtStyle = if (text.length > 4) MaterialTheme.typography.labelMedium else MaterialTheme.typography.bodyMedium
         if (sub == null) {
             Text(
                 text,
@@ -940,7 +1098,7 @@ private fun EpisodeButton(text: String, focused: Boolean, dl: EpDlInfo, isLastWa
                     focused -> Color.White
                     else -> Anidock.Text2                   // 未下载=灰
                 },
-                style = MaterialTheme.typography.bodyMedium.copy(
+                style = txtStyle.copy(
                     fontWeight = if (focused) FontWeight.Bold else FontWeight.Normal
                 ),
             )
@@ -954,7 +1112,7 @@ private fun EpisodeButton(text: String, focused: Boolean, dl: EpDlInfo, isLastWa
                         focused -> Color.White
                         else -> Anidock.Text2
                     },
-                    style = MaterialTheme.typography.bodyMedium.copy(
+                    style = txtStyle.copy(
                         fontWeight = if (focused || dl.state == "completed") FontWeight.Bold else FontWeight.Normal
                     ),
                 )
@@ -1026,6 +1184,48 @@ private fun SourcePickOverlay(ep: EpisodeView, idx: Int) {
     }
 }
 
+/** 续播选择覆盖层:从上次位置继续 / 从头开始 /(合集)从上次文件头部。副标题带时间点与文件名。 */
+@Composable
+private fun ResumeOverlay(opts: List<ResumeOpt>, idx: Int) {
+    Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.6f)), contentAlignment = Alignment.Center) {
+        Surface(
+            shape = RoundedCornerShape(14.dp),
+            color = Anidock.Card,
+            modifier = Modifier
+                .width(500.dp)
+                .border(2.dp, Anidock.Accent, RoundedCornerShape(14.dp)),
+        ) {
+            Column(Modifier.padding(vertical = 8.dp)) {
+                Text(
+                    "继续观看?",
+                    color = Anidock.Text3,
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                )
+                opts.forEachIndexed { i, o ->
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .background(if (i == idx) Anidock.Accent.copy(alpha = 0.25f) else Color.Transparent)
+                            .padding(horizontal = 16.dp, vertical = 9.dp),
+                    ) {
+                        Text(o.title, color = if (i == idx) Color.White else Anidock.Text2, style = MaterialTheme.typography.bodyLarge)
+                        if (o.sub.isNotBlank()) {
+                            Text(
+                                o.sub,
+                                color = Anidock.Text3,
+                                style = MaterialTheme.typography.labelSmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /** 长按菜单覆盖层:按剧集下载状态给出操作。 */
 @Composable
 private fun EpMenuOverlay(menu: EpMenu, idx: Int) {
@@ -1039,7 +1239,7 @@ private fun EpMenuOverlay(menu: EpMenu, idx: Int) {
         ) {
             Column(Modifier.padding(vertical = 8.dp)) {
                 Text(
-                    "第${menu.ep.episode.toEpText()}集",
+                    if (menu.ep.episodeTo != null) epBtnText(menu.ep) else "第${menu.ep.episode.toEpText()}集",
                     color = Anidock.Text3,
                     style = MaterialTheme.typography.labelMedium,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
@@ -1266,5 +1466,3 @@ private fun parseColor(h: String): Color = try {
 
 /** tag 行 tag 总数(季度 chip + 各 genre chip)。 */
 private fun tagCount(a: Anime): Int = (if (a.seasonLabel.isNotBlank()) 1 else 0) + a.genres.size
-
-private fun Float.toEpText(): String = if (this % 1f == 0f) "${toInt()}" else "${Math.round(this * 10) / 10f}"

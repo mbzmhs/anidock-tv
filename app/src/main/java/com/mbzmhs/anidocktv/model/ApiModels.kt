@@ -72,6 +72,8 @@ data class Release(
 @Serializable
 data class EpisodeView(
     val episode: Float,
+    /** 非空 = 多文件合集区间终点(展示"X~Y 合集";episode 为 -(起点*1000+终点) 的负键,best.episode=起点)。 */
+    @SerialName("episode_to") val episodeTo: Float? = null,
     val best: Release,
     @SerialName("alternatives") val alternatives: List<Release> = emptyList(),
 )

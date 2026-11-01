@@ -41,7 +41,7 @@ class AnidockApp : Application() {
     override fun onCreate() {
         super.onCreate()
         // 关闭本进程 file:// URI 外发检查:下载文件都在共享存储,完成后要直接把
-        // file:// 路径交给 Kodi 播放(Kodi 19 对 content URI 有 _onNewIntent 崩溃 bug)。
+        // file:// 路径交给外部播放器(实测部分外部播放器对 content URI 有 _onNewIntent 崩溃 bug)。
         // 该检查只约束本进程发 intent 的行为,不涉及真实数据泄露。
         android.os.StrictMode.setVmPolicy(android.os.StrictMode.VmPolicy.Builder().build())
         Services.appContext = this
@@ -68,7 +68,7 @@ class AnidockApp : Application() {
         val api = AnidockApi(SettingKeys.DEFAULT_BASE_URL)
         runBlocking { settingDao.get(SettingKeys.BASE_URL) }?.let { api.setBaseUrl(it) }
         Services.api = api
-        Services.repo = AnidockRepository(api, db.animeDao(), settingDao, db.downloadTaskDao())
+        Services.repo = AnidockRepository(api, db.animeDao(), settingDao, db.downloadTaskDao(), db.playbackPosDao())
         // 引擎看门狗前台服务:顶高进程权重(电视待机不易被杀)+ 引擎进程被杀时自动拉起
         runCatching {
             startForegroundService(android.content.Intent(this, EngineWatchdogService::class.java))
