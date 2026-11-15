@@ -11,6 +11,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
@@ -46,6 +47,15 @@ object EngineService {
         .build()
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+    /** 配置补丁专用:必须把等于模型默认值的字段也发出去。
+     *  kotlinx 默认 encodeDefaults=false,false/0/默认值会被省略;而引擎
+     *  PUT /api/config 是"缺省=保持原值"的合并更新,省略会让"关开关/改回
+     *  默认值"静默失效(实测 autoSeed 关不掉、DHT 关了就开不回来)。 */
+    private val configJson = Json {
+        ignoreUnknownKeys = true
+        isLenient = true
+        encodeDefaults = true
+    }
 
     @Volatile private var process: Process? = null
 
@@ -363,9 +373,14 @@ object EngineService {
     @Serializable
     private data class BanListResp(val bans: List<BanEntry> = emptyList())
 
-    /** 保存完整 BT 配置:数据类整体序列化,不再手工逐字段枚举(引擎加字段时只需更新 EngineBtConfig 一处)。 */
-    suspend fun saveBtConfig(bt: EngineBtConfig): Boolean =
-        saveEngineConfig(buildJsonObject { put("bt", json.encodeToJsonElement(EngineBtConfig.serializer(), bt).jsonObject) })
+    /** 保存完整 BT 配置:数据类整体序列化,不再手工逐字段枚举(引擎加字段时只需更新 EngineBtConfig 一处)。
+     *  用 configJson 连默认值一起发;null(如未取到 publicTrackers)必须剔除,
+     *  否则会被引擎当成"清空该列表"。 */
+    suspend fun saveBtConfig(bt: EngineBtConfig): Boolean {
+        val fields = configJson.encodeToJsonElement(EngineBtConfig.serializer(), bt).jsonObject
+            .filterValues { it != JsonNull }
+        return saveEngineConfig(buildJsonObject { put("bt", JsonObject(fields)) })
+    }
 
     /** 封禁名单(GET /api/bt/bans)。失败返回 null。 */
     suspend fun getBans(): List<BanEntry>? = withContext(Dispatchers.IO) {

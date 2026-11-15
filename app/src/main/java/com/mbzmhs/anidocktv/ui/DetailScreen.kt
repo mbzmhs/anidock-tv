@@ -379,15 +379,29 @@ fun DetailScreen(
         }
     }
 
-    /** 短按:下载中→暂停;已暂停→继续。状态以引擎回写为准(随后刷新关联表)。 */
+    /** 短按:下载中→暂停;已暂停→继续;做种→停止做种。状态以引擎回写为准(随后刷新关联表)。 */
     fun pauseResumeEpDownload(ep: EpisodeView) {
         val row = bestTask(ep.episode, dlTasks) ?: return
         val resuming = row.status == "paused"
+        val wasSeeding = row.status == "seeding"
         scope.launch {
             val ok = Services.repo.togglePauseDownload(row)
             dlTasks = Services.repo.downloadTasks(animeId)
-            if (!ok) Toast.makeText(context, if (resuming) "继续失败,稍后再试" else "暂停失败,稍后再试", Toast.LENGTH_SHORT).show()
-            else Toast.makeText(context, if (resuming) "已继续" else "已暂停", Toast.LENGTH_SHORT).show()
+            if (!ok) {
+                val msg = when {
+                    resuming -> "继续失败,稍后再试"
+                    wasSeeding -> "停止做种失败,稍后再试"
+                    else -> "暂停失败,稍后再试"
+                }
+                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+            } else {
+                val msg = when {
+                    resuming -> "已继续"
+                    wasSeeding -> "已停止做种"
+                    else -> "已暂停"
+                }
+                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
@@ -510,7 +524,9 @@ fun DetailScreen(
         menuIdx = 0
         epMenu = EpMenu(ep, when (epDlInfo(ep.episode, dlTasks).state) {
             // 下载中:短按已改为边下边播,暂停/继续收进长按菜单;合集可随时进文件列表改选
-            "fetching", "creating", "queued", "downloading", "seeding", "moving" -> listOf("暂停下载", "文件列表", "取消下载")
+            "fetching", "creating", "queued", "downloading", "moving" -> listOf("暂停下载", "文件列表", "取消下载")
+            // 做种没有"暂停后继续"语义:引擎 pause 会把任务直接归入已完成并停做种
+            "seeding" -> listOf("停止做种", "文件列表", "取消下载")
             "paused" -> listOf("继续下载", "文件列表", "取消下载")
             "completed" -> listOf("文件列表", "重新下载(选来源)", "删除文件")
             // 多文件合集:元数据就绪待选文件,进文件列表勾选后才开始下载
@@ -572,7 +588,7 @@ fun DetailScreen(
                             "重试" -> retryEpDownload(ep)
                             "选择来源下载", "重新下载(选来源)" -> { sourcePick = ep; sourceIdx = 0 }
                             "选择文件", "文件列表" -> openFilesDialog(ep)
-                            "暂停下载", "继续下载" -> pauseResumeEpDownload(ep)
+                            "暂停下载", "继续下载", "停止做种" -> pauseResumeEpDownload(ep)
                             "取消下载", "删除文件" -> deleteEpDownload(ep)
                         }
                 }
