@@ -50,6 +50,7 @@ import com.mbzmhs.anidocktv.player.PlayerEpisode
 import com.mbzmhs.anidocktv.player.PlayerExtras
 import com.mbzmhs.anidocktv.player.PlayerSwitch
 import com.mbzmhs.anidocktv.player.TrackRow
+import com.mbzmhs.anidocktv.player.NativeVideoLayout
 import com.mbzmhs.anidocktv.player.VlcEngine
 import com.mbzmhs.anidocktv.player.VlcPlayerController
 import com.mbzmhs.anidocktv.ui.theme.Anidock
@@ -58,7 +59,6 @@ import com.mbzmhs.anidocktv.ui.tv.KeyHit
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.videolan.libvlc.MediaPlayer
-import org.videolan.libvlc.util.VLCVideoLayout
 
 /** 自动连播开关(进程级,播放菜单可切,默认开)。 */
 private val autoNextEnabled = mutableStateOf(true)
@@ -96,7 +96,7 @@ private val SCALE_OPTIONS = listOf(
 private val SUB_EXTS = setOf("srt", "ass", "ssa", "vtt", "sub", "smi", "sup")
 
 /**
- * 内置播放器(全屏覆盖层):VLCVideoLayout 出画面,控制 UI 全自研。
+ * 内置播放器(全屏覆盖层):NativeVideoLayout 出画面(原生视频层 + GL 字幕层),控制 UI 全自研。
  * 独立组件:只依赖 [PlaybackSource]/[keyHit]/[onClose],不 import 任何业务类型。
  * 按键(focus-as-state,与全 App 一致):
  * - CENTER=播放/暂停(长按=菜单);MENU=播放菜单;UP/DOWN=上一章/下一章;BACK=关菜单/退出
@@ -305,7 +305,7 @@ fun PlayerScreen(
             add(MenuRow("画面比例:${SCALE_OPTIONS.firstOrNull { it.first == controller.scaleType }?.second ?: "自适应"}") {
                 openSection(MenuSection.SCALE)
             })
-            // 解码模式循环:硬件直渲 → 硬件无直渲(黑屏自愈档,10bit HEVC 用)→ 软件(老编码兜底)。
+            // 解码模式循环:硬件直渲 → 硬件无直渲(直渲绑定黑屏时救急;10bit HEVC 不能用)→ 软件(老编码兜底)。
             // 切换后原地续播
             add(MenuRow("解码:${decodeName(com.mbzmhs.anidocktv.player.VlcEngine.decodeMode)}(确认切换)") {
                 val keep = controller.timeMs
@@ -473,12 +473,13 @@ fun PlayerScreen(
     }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
-        // 视频画面:VLCVideoLayout(SurfaceView+独立字幕层)。挂载必须等 View attach 后(主线程),
-        // 用 View.post 保证;挂载本体由控制器串行调度(见 attachTo),完成后回调才置 surfaceReady
-        // 放行开播。attachViews 一次性,重组不重复。
+        // 视频画面:NativeVideoLayout(原生 SurfaceView 视频层 + 独立 GL 字幕层,零拷贝上屏,
+        // 可走电视硬件插帧;字幕由 GL shader 预乘 alpha,修 ASS 半透明描边白边)。
+        // 挂载必须等 View attach 后(主线程),用 View.post 保证;挂载本体由控制器串行调度
+        // (见 attachTo),完成后回调才置 surfaceReady 放行开播。attachViews 一次性,重组不重复。
         AndroidView(
             modifier = Modifier.fillMaxSize(),
-            factory = { ctx -> VLCVideoLayout(ctx).also { l -> l.post { controller.attachTo(l) { surfaceReady = true } } } },
+            factory = { ctx -> NativeVideoLayout(ctx).also { l -> l.post { controller.attachTo(l) { surfaceReady = true } } } },
         )
 
         // 缓冲转圈:流场景失败期间也维持转圈(未就绪是正常生命周期,交给后台无限重试);

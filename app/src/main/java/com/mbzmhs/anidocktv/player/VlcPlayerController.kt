@@ -21,7 +21,6 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.videolan.libvlc.LibVLC
 import org.videolan.libvlc.MediaPlayer
 import org.videolan.libvlc.interfaces.IMedia
-import org.videolan.libvlc.util.VLCVideoLayout
 
 /**
  * libVLC 进程级单例:native 库加载与实例创建只做一次,播放器会话关闭后复用。
@@ -36,7 +35,7 @@ object VlcEngine {
      * - 硬件直渲:MediaCodec 输出直接上屏,最快;但直渲与 Surface 的绑定偶发失败 → 黑屏有声,
      *   开播时序已修正 + 看门狗自愈,仍偶发可切"硬件无直渲"。
      * - 硬件无直渲(:no-mediacodec-dr):仍走 MediaCodec,帧拷贝后再上屏,绕开直渲绑定路径,
-     *   适合 10bit HEVC(芯片能硬解,但本机 armv7 软解 10bit 几乎不出帧,软解救不了)。
+     *   适合直渲绑定失败时救急;10bit HEVC 不要用(拷贝路径不支持 10bit,会黑屏/不出帧)。
      * - 软件:ffmpeg 全量软解,给芯片缺解码器的老编码用(8bit 可用,10bit HEVC 算力不够)。
      */
     @Volatile var decodeMode: Int = 0
@@ -146,6 +145,9 @@ class VlcPlayerController(context: Context) {
     private val vlc = VlcEngine.get(context)
     /** 进程级共享播放器(见 VlcEngine.player 注释):控制器只是会话包装,不持有独立实例。 */
     val player = VlcEngine.player(context)
+
+    /** 本会话挂载的原生视频层(卸载时清回调;GL 字幕层随 Compose 树销毁)。 */
+    private var attachedLayout: NativeVideoLayout? = null
 
     // ---- 播放状态(事件驱动) ----
     var playing by mutableStateOf(false)
@@ -376,6 +378,7 @@ class VlcPlayerController(context: Context) {
 
     fun setScale(type: MediaPlayer.ScaleType) {
         scaleType = type
+        attachedLayout?.setScaleType(type)
         VlcEngine.ctlAsync("scale") { player.setVideoScale(type) }
     }
 
@@ -430,25 +433,48 @@ class VlcPlayerController(context: Context) {
         }
     }
 
-    /** 挂载画面(View 已 attach 后调用)。attachViews 是主线程同步原生调用、可能等播放器内部锁:
-     *  编排从 guardScope 发起(带时限),执行时先等 [VlcEngine.ctrlMutex]——等锁是协程挂起、
-     *  不阻塞主线程;轮到时必无在途原生操作,不会对着卡死的 stop 干等。画面占用(viewsOwner)
+    /** 挂载画面(View 已 attach 后调用)。视频走原生 SurfaceView(不参与应用逐帧合成,
+     *  保留电视硬件插帧/零拷贝上屏);字幕走 VLC 字幕 SurfaceTexture,由独立 GL 层
+     *  在 shader 里预乘 alpha 后上屏(修 native 字幕面未预乘导致的白边)。
+     *  attachViews 是主线程同步原生调用、可能等播放器内部锁:编排从 guardScope 发起
+     *  (带时限),执行时先等 [VlcEngine.ctrlMutex]——等锁是协程挂起、不阻塞主线程;
+     *  轮到时必无在途原生操作,不会对着卡死的 stop 干等。画面占用(viewsOwner)
      *  在锁内置位,与上一会话的关闭序列按互斥队列天然"先停后挂"排序。
+     *  GL 字幕纹理在 GL 线程创建,最多等 5 秒;超时退回 VLC 原生字幕 SurfaceView。
      *  [onAttached] 在挂载完成或放弃后回调(主线程),用于放行开播(surfaceReady)。 */
-    fun attachTo(layout: VLCVideoLayout, onAttached: () -> Unit) {
+    fun attachTo(layout: NativeVideoLayout, onAttached: () -> Unit) {
         if (VlcEngine.viewsOwner === this) {
             onAttached()
             return
         }
         VlcEngine.guardScope.launch {
+            // GL 字幕纹理在 GL 线程创建;视频层不依赖它,超时就切原生字幕层兜底
+            val subtitleTexture = withTimeoutOrNull(5_000L) { layout.awaitSubtitleTexture() }
             val ok = withTimeoutOrNull(VlcEngine.CTRL_TIMEOUT_MS) {
                 withContext(Dispatchers.Main) {
                     VlcEngine.ctrlMutex.withLock {
                         if (!VlcEngine.wedged) {
                             VlcEngine.viewsOwner = this@VlcPlayerController
-                            // textureView=true:视频走 TextureView 的 GL vout,字幕在 VLC 自己的 shader 里与视频
-                            // 合成——绕开"native 字幕层→安卓位图"路径的预乘缺陷(ASS 阴影/半透明描边会出白边)。
-                            runCatching { player.attachViews(layout, null, true, true) }
+                            attachedLayout = layout
+                            layout.setScaleType(scaleType)
+                            layout.onWindowSize = { w, h ->
+                                // AWindow 的显示尺寸(帧窗口大小);字幕面/比例计算依赖它
+                                VlcEngine.ctlAsync("windowSize") {
+                                    player.vlcVout.setWindowSize(w, h)
+                                }
+                            }
+                            val vout = player.vlcVout
+                            vout.setVideoView(layout.videoView)
+                            if (subtitleTexture != null) {
+                                // VLC 直接写字幕 SurfaceTexture;GL 线程消费并在 shader 里预乘 alpha
+                                vout.setSubtitlesSurface(subtitleTexture)
+                            } else {
+                                layout.useFallbackSubtitles()
+                                vout.setSubtitlesView(layout.fallbackSubtitleView)
+                            }
+                            runCatching { vout.attachViews(layout) }
+                            // 视频尺寸回调前先用当前帧尺寸兜底(回调到达后会再更新)
+                            runCatching { vout.setWindowSize(layout.windowWidth(), layout.windowHeight()) }
                         }
                     }
                 }
@@ -463,6 +489,12 @@ class VlcPlayerController(context: Context) {
         if (VlcEngine.viewsOwner !== this) return
         VlcEngine.viewsOwner = null
         runCatching { player.detachViews() }
+        attachedLayout?.let {
+            it.onWindowSize = null
+            // detachViews 之后才释放字幕 SurfaceTexture(VLC 的 producer 侧已断开)
+            it.releaseSubtitleTexture()
+        }
+        attachedLayout = null
     }
 
     /**
