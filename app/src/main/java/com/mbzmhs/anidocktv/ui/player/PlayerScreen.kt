@@ -305,11 +305,10 @@ fun PlayerScreen(
             add(MenuRow("画面比例:${SCALE_OPTIONS.firstOrNull { it.first == controller.scaleType }?.second ?: "自适应"}") {
                 openSection(MenuSection.SCALE)
             })
-            // 解码模式循环:硬件直渲 → 硬件无直渲(直渲绑定黑屏时救急;10bit HEVC 不能用)→ 软件(老编码兜底)。
-            // 切换后原地续播
-            add(MenuRow("解码:${decodeName(com.mbzmhs.anidocktv.player.VlcEngine.decodeMode)}(确认切换)") {
+            // 解码模式循环:硬件(默认)→ 软件(老编码/硬解失败兜底)。切换后原地续播
+            add(MenuRow("解码:${decodeName(VlcEngine.decodeMode)} · 确认切换") {
                 val keep = controller.timeMs
-                com.mbzmhs.anidocktv.player.VlcEngine.decodeMode = (com.mbzmhs.anidocktv.player.VlcEngine.decodeMode + 1) % 3
+                VlcEngine.decodeMode = (VlcEngine.decodeMode + 1) % 2
                 pScope.launch { controller.open(source) }
                 pendingSeekMs = keep
                 closeMenu(); pulseHud()
@@ -767,9 +766,8 @@ private fun OutlinedText(
 
 /** 解码模式名(菜单显示)。 */
 private fun decodeName(mode: Int): String = when (mode) {
-    1 -> "硬件无直渲"
-    2 -> "软件"
-    else -> "硬件直渲"
+    1 -> "软件(兼容,慢)"
+    else -> "硬件(默认)"
 }
 
 private fun fmtTime(ms: Long): String {

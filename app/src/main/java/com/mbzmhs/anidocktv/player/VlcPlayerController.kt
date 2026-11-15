@@ -31,12 +31,11 @@ object VlcEngine {
     @Volatile private var lib: LibVLC? = null
 
     /**
-     * 解码模式(进程级;0=硬件直渲默认,1=硬件无直渲,2=软件)。
-     * - 硬件直渲:MediaCodec 输出直接上屏,最快;但直渲与 Surface 的绑定偶发失败 → 黑屏有声,
-     *   开播时序已修正 + 看门狗自愈,仍偶发可切"硬件无直渲"。
-     * - 硬件无直渲(:no-mediacodec-dr):仍走 MediaCodec,帧拷贝后再上屏,绕开直渲绑定路径,
-     *   适合直渲绑定失败时救急;10bit HEVC 不要用(拷贝路径不支持 10bit,会黑屏/不出帧)。
-     * - 软件:ffmpeg 全量软解,给芯片缺解码器的老编码用(8bit 可用,10bit HEVC 算力不够)。
+     * 解码模式(进程级;0=硬件默认,1=软件)。
+     * - 硬件:MediaCodec 输出直接上屏,最快,10bit HEVC 唯一可用档。
+     * - 软件:ffmpeg 全量软解,老编码/硬解失败兜底;8bit 尚可,10bit 与高码率 1080p 算力不够。
+     * 原「硬件无直渲(拷贝上屏)」档已移除:它是 TextureView 时代绕直渲绑定黑屏的补丁,
+     * 换回原生 SurfaceView 后直渲稳定,且该档不支持 10bit,常驻菜单容易被误切。
      */
     @Volatile var decodeMode: Int = 0
 
@@ -308,8 +307,7 @@ class VlcPlayerController(context: Context) {
                         is PlaybackSource.LocalFile -> org.videolan.libvlc.Media(vlc, source.path)
                         is PlaybackSource.HttpStream -> org.videolan.libvlc.Media(vlc, Uri.parse(source.url))
                     }
-                    media.setHWDecoderEnabled(VlcEngine.decodeMode != 2, false)
-                    if (VlcEngine.decodeMode == 1) media.addOption(":no-mediacodec-dr")
+                    media.setHWDecoderEnabled(VlcEngine.decodeMode == 0, false)
                     player.media = media
                     media.release()
                     player.play()
