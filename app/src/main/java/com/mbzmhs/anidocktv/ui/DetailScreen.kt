@@ -216,10 +216,14 @@ fun DetailScreen(
 
     val scrollState = rememberScrollState()
     val visH = remember { mutableStateOf(0) }         // 视口高(px)
-    // 剧集流容器宽(px),用于算列数。初值解析计算:屏宽 - 左右 padding(88dp) - 封面列(300dp) - 列间距(24dp),
+    // 剧集流容器宽(px),用于算列数。初值解析计算:窗口宽 - 左右 padding(88dp) - 封面列(300dp) - 列间距(24dp),
     // 首帧即为正确列数,避免先按 cols=1 画成单列、等 onSizeChanged 测宽后整页重排造成的闪烁;
     // 之后 onSizeChanged 用实测值覆盖(正常两者一致)。
-    val screenW = with(density) { androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp.dp.roundToPx() }
+    // 窗口宽必须取真实像素:自适应缩放会改写 LocalDensity,configuration.screenWidthDp
+    // 仍是系统原始 dp,再乘缩放后的 density 会把宽度算大一倍(4K 逻辑 UI 下直接影响列数与锚点)。
+    val rootView = androidx.compose.ui.platform.LocalView.current
+    val screenW = if (rootView.width > 0) rootView.width
+        else context.resources.displayMetrics.widthPixels
     val epFlowW = remember { mutableStateOf((screenW - with(density) { 412.dp.roundToPx() }).coerceAtLeast(0)) }
     val containerRootY = remember { mutableStateOf(0) }                       // 滚动容器屏幕 top(px)
     val anchorPos = remember { mutableStateOf<Map<Int, Pair<Int, Int>>>(emptyMap()) }  // anchorId -> (屏幕top, 测量时scroll)
@@ -678,7 +682,7 @@ fun DetailScreen(
             else -> null
         }
     }
-    LaunchedEffect(focusIdx, anchorPos.value, containerRootY.value, visH.value) {
+    LaunchedEffect(focusIdx, anchorPos.value, containerRootY.value, visH.value, density) {
         // 手动滚动中:跳过焦点回滚,让用户的滚动保持(声优等长块往下看不被拉回)
         if (manualScroll) return@LaunchedEffect
         val vh = visH.value

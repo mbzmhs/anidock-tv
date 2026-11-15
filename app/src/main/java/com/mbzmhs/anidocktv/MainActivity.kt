@@ -37,6 +37,7 @@ import com.mbzmhs.anidocktv.ui.DetailScreen
 import com.mbzmhs.anidocktv.ui.EngineSettingsScreen
 import com.mbzmhs.anidocktv.ui.HomeScreen
 import com.mbzmhs.anidocktv.ui.HomeTab
+import com.mbzmhs.anidocktv.ui.ProvideAnidockUi
 import com.mbzmhs.anidocktv.ui.SettingsScreen
 import com.mbzmhs.anidocktv.ui.player.PlayerScreen
 import com.mbzmhs.anidocktv.ui.theme.Anidock
@@ -87,6 +88,9 @@ class MainActivity : ComponentActivity() {
             androidx.compose.runtime.CompositionLocalProvider(
                 coil.compose.LocalImageLoader provides imageLoader
             ) {
+            // 自适应尺寸:电视按 960x540 设计画布等比缩放(4K 逻辑 UI 不缩水),
+            // 平板/手机保持真实密度并按宽度增减首页列数
+            ProvideAnidockUi {
             AnidockTheme {
                 // 默认首页:按设置打开对应 tab(番剧列表/我的追番)
                 var tab by remember { mutableStateOf(if (Services.homeTab == "FOLLOWED") HomeTab.FOLLOWED else HomeTab.LIST) }
@@ -329,6 +333,7 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
+            }
             }
             }
         }

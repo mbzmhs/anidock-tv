@@ -387,7 +387,7 @@ fun EngineSettingsScreen(onBack: () -> Unit, keyHit: KeyHit) {
         SettingDisplay.Item(SettingRowDef("伪装名称", c?.bt?.spoofName?.ifBlank { "—" } ?: "—", "回车编辑")),
     )
     // 分区标题占高,按 display 逐段累加像素,算出每个可聚焦行真实的 top(px)。
-    val fieldTops = remember(display) {
+    val fieldTops = remember(display, density) {
         val gap = with(density) { 12.dp.roundToPx() }
         val headerH = with(density) { 30.dp.roundToPx() }
         val fieldH = with(density) { 56.dp.roundToPx() }

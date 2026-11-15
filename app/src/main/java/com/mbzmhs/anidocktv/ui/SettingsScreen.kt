@@ -580,7 +580,7 @@ fun SettingsScreen(onBack: () -> Unit, onEngineSettings: () -> Unit = {}, keyHit
     val settingsScroll = rememberScrollState()
     val visH = remember { mutableStateOf(0) }
     val density = LocalDensity.current
-    val fieldTops = remember(display) {
+    val fieldTops = remember(display, density) {
         val gap = with(density) { 12.dp.roundToPx() }
         val headerH = with(density) { 30.dp.roundToPx() }
         val fieldH = with(density) { 56.dp.roundToPx() }
@@ -824,7 +824,7 @@ private fun DirPickList(items: List<PickItem>, pickIdx: Int) {
     val firstShortcut = items.indexOfFirst { it.shortcut }   // -1 = 无快捷区
     // 列表内容变了(进目录),回卷到顶
     LaunchedEffect(items) { scroll.scrollTo(0) }
-    LaunchedEffect(pickIdx) {
+    LaunchedEffect(pickIdx, density) {
         val rowPx = with(density) { PICK_ROW_H.dp.roundToPx() }
         val divPx = with(density) { PICK_DIV_H.dp.roundToPx() }
         val vpPx = with(density) { PICK_LIST_H.dp.roundToPx() }

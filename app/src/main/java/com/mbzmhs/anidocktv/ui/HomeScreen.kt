@@ -58,8 +58,6 @@ private const val BLOCK_TAB = 0
 private const val BLOCK_GRID = 1
 private const val BLOCK_PAGER = 2
 
-private const val COLS = 4
-
 /** 记录某节点高度(px)。 */
 private fun Modifier.trackHeight(block: (Int) -> Unit): Modifier =
     onSizeChanged { block(it.height) }
@@ -90,6 +88,9 @@ fun HomeScreen(
     onPlayFile: (file: java.io.File, label: String, extras: com.mbzmhs.anidocktv.player.PlayerExtras?) -> Unit = { _, _, _ -> },
     keyHit: KeyHit,
 ) {
+    // 网格列数随窗口有效宽度自适应:1080p 电视(960dp 画布)固定 4 列,
+    // 更宽的电视/平板自动增加到 5..8 列;焦点导航与滚动计算全部用它,不再写死。
+    val cols = LocalUiMetrics.current.homeColumns
     // 从当前 tab 的 filters 解出字段,便于下方沿用原变量名;翻页/侧边栏改动都经 onFilters(filters.copy(...)) 回写
     val year = filters.year
     val quarter = filters.quarter
@@ -295,7 +296,7 @@ fun HomeScreen(
     }
 
     val pages = maxOf(1, total / pageSize)
-    val rows = maxOf(1, (list.size + COLS - 1) / COLS)
+    val rows = maxOf(1, (list.size + cols - 1) / cols)
     if (row >= rows) row = rows - 1
     // 最后一行不满时,焦点收拢到实际存在的卡片内,避免落到空格子上(翻页/筛选改变列表后同样兜底)。
     // 仅对网格生效:分页条的 col 是"左/右按钮"语义,不能被格子数收拢回去
@@ -303,7 +304,7 @@ fun HomeScreen(
         if (list.isEmpty()) {
             col = 0
         } else {
-            val inRow = minOf(COLS, list.size - row * COLS)   // 当前行实际卡片数
+            val inRow = minOf(cols, list.size - row * cols)   // 当前行实际卡片数
             if (col >= inRow) col = inRow - 1
             if (col < 0) col = 0
         }
@@ -382,14 +383,14 @@ fun HomeScreen(
             BLOCK_TAB -> when (key) {
                 K.RIGHT -> if (col < 1) col++
                 K.LEFT -> if (col > 0) col--
-                K.DOWN -> { block = BLOCK_GRID; row = 0; col = minOf(col, COLS - 1) }
+                K.DOWN -> { block = BLOCK_GRID; row = 0; col = minOf(col, cols - 1) }
                 K.CENTER, K.ENTER -> onTab(if (col == 0) HomeTab.LIST else HomeTab.FOLLOWED)
             }
             BLOCK_GRID -> when (key) {
                 // 右移仅在下一格有卡片时允许(最后一行不满时不能走进空格子)
                 K.RIGHT -> {
-                    val next = row * COLS + col + 1
-                    if (col < COLS - 1 && next < list.size) col++
+                    val next = row * cols + col + 1
+                    if (col < cols - 1 && next < list.size) col++
                 }
                 K.LEFT -> if (col > 0) col--
                 K.UP -> if (row > 0) row-- else { block = BLOCK_TAB; col = minOf(col, 1) }
@@ -397,15 +398,15 @@ fun HomeScreen(
                     if (row < rows - 1) {
                         row++
                         // 下一行不满时,焦点收拢到该行实际卡片内
-                        val inRow = minOf(COLS, list.size - row * COLS)
+                        val inRow = minOf(cols, list.size - row * cols)
                         if (col >= inRow) col = inRow - 1
                     } else {
                         // 最后一行往下:焦点落在左半屏→上一页按钮,右半屏→下一页按钮
-                        block = BLOCK_PAGER; col = if (col < COLS / 2) 0 else 1
+                        block = BLOCK_PAGER; col = if (col < cols / 2) 0 else 1
                     }
                 }
                 K.CENTER, K.ENTER -> {
-                    val idx = row * COLS + col
+                    val idx = row * cols + col
                     if (idx in list.indices) onAnimeClick(list[idx].anime)
                 }
             }
@@ -417,7 +418,7 @@ fun HomeScreen(
                     row = rows - 1
                     // 下一页(右半)按上→最后一行最后一个存在的格子;上一页(左半)按上→最后一行第一个格子
                     if (col == 1) {
-                        val inRow = minOf(COLS, list.size - row * COLS)
+                        val inRow = minOf(cols, list.size - row * cols)
                         col = (inRow - 1).coerceAtLeast(0)
                     } else {
                         col = 0
@@ -439,7 +440,7 @@ fun HomeScreen(
     }
 
     // 焦点驱动滚动:Tab→顶,网格→对应行,分页→内容底
-    LaunchedEffect(block, row, tabH.value, rowH.value, visH.value) {
+    LaunchedEffect(block, row, tabH.value, rowH.value, visH.value, density) {
         val vh = visH.value
         if (vh <= 0) return@LaunchedEffect
         when (block) {
@@ -501,7 +502,7 @@ fun HomeScreen(
                 else -> GridWithPager(
                     list = list, block = block, col = col, row = row,
                     page = page, pages = pages, total = total, pageSize = pageSize,
-                    rowH = rowH,
+                    cols = cols, rowH = rowH,
                 )
             }
         }
@@ -694,10 +695,11 @@ private fun GridWithPager(
     list: List<AnimeCardData>,
     block: Int, col: Int, row: Int,
     page: Int, pages: Int, total: Int, pageSize: Int,
+    cols: Int,
     rowH: MutableState<Int>,
 ) {
     Column {
-        list.chunked(COLS).forEachIndexed { r, rowList ->
+        list.chunked(cols).forEachIndexed { r, rowList ->
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -705,13 +707,13 @@ private fun GridWithPager(
                     .padding(bottom = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
             ) {
-                repeat(COLS) { c ->
+                repeat(cols) { c ->
                     val item = rowList.getOrNull(c)
                     Box(modifier = Modifier.weight(1f)) {
                         if (item != null) {
                             AnimeCard(
                                 data = item,
-                                isFocused = block == BLOCK_GRID && r * COLS + c == row * COLS + col,
+                                isFocused = block == BLOCK_GRID && r * cols + c == row * cols + col,
                             )
                         }
                     }
