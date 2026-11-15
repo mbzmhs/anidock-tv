@@ -37,25 +37,31 @@ class AnidockRepository(
     /** 下载建任务的锁:按"番剧id:集数"一个条目一把锁。每个剧集条目独立串行(查重+建原子),
      *  不同剧集条目并发。防止快速连点同一集并发建出同 infoHash 的重复任务。 */
     private val dlLocks = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
-    /** 登录失败标记:失败后不再重试(避免 429 死循环),用户改密码/地址后重置。 */
+    /** 登录失败标记:失败后短时间内不再重试(避免 429 死循环),60s 退避后允许重试,
+     *  网络恢复/服务器恢复后能自动复活;用户改密码/地址后立即重置。 */
     @Volatile var loginError: String = ""
         private set
+    @Volatile private var loginFailedAt: Long = 0
 
-    /** 未登录则用设置里的访客密码自动登录;失败后锁定不再重试。 */
+    /** 未登录则用设置里的访客密码自动登录。 */
     suspend fun autoLogin() {
         if (api.token.isNotEmpty()) return
-        if (loginError.isNotEmpty()) return  // 已失败,不再重试
+        // 失败退避:60s 内不重试,过后放行(避免离线状态下每次进页面都打一次请求)
+        if (loginError.isNotEmpty() && System.currentTimeMillis() - loginFailedAt < 60_000L) return
         try {
             api.login(com.mbzmhs.anidocktv.Services.visitorPassword)
             loginError = ""
+            loginFailedAt = 0
         } catch (e: Exception) {
             loginError = e.message ?: "登录失败"
+            loginFailedAt = System.currentTimeMillis()
         }
     }
 
     /** 用户主动改密码/地址后调用,重置失败锁。 */
     fun resetLoginError() {
         loginError = ""
+        loginFailedAt = 0
     }
 
     /** 设置项读写(设置页)。 */
@@ -547,6 +553,34 @@ class AnidockRepository(
 
     suspend fun getAnime(id: Long): Anime = api.getAnime(id)
     suspend fun episodes(animeId: Long): List<EpisodeView> = api.episodes(animeId)
+
+    /** 本地实体 → 轻量 Anime(离线详情页头部):只含本地存过的字段,详情专有字段
+     *  (genres/cast/images/feed 等)留空,各区块按字段存在性自动隐藏。 */
+    suspend fun localAnimeModel(id: Long): Anime? {
+        val e = dao.byAnidockId(id) ?: return null
+        return Anime(
+            id = e.anidockId, title = e.title, titleOrig = e.titleOrig,
+            synopsis = e.synopsis, year = e.year, quarter = e.quarter,
+            seasonLabel = e.seasonLabel, cover = e.cover, poster = e.poster,
+            studio = e.studio,
+            latestEpisode = e.latestEpisode, episodeCount = e.episodeCount,
+        )
+    }
+
+    /** 离线剧集表:由本地下载任务行合成最小 EpisodeView(只有本地建过任务的集)。
+     *  合集负键 = -(起点*1000+终点):起点按 0.1 精度还原(与 epBtnText 兜底口径一致),
+     *  终点取键值剩余部分;单集直接用集号。 */
+    suspend fun localEpisodeViews(animeId: Long): List<EpisodeView> =
+        downloadDao.byAnime(animeId).mapNotNull { r ->
+            if (r.episode == 0f) return@mapNotNull null
+            val start = if (r.episode < 0f) Math.round(-r.episode / 100f) * 0.1f else r.episode
+            val to = if (r.episode < 0f) (-r.episode) - start * 1000f else null
+            EpisodeView(
+                episode = r.episode,
+                episodeTo = to,
+                best = Release(id = r.id, title = r.releaseTitle, episode = start),
+            )
+        }
 
     /** 关注/取消关注某番剧(本地持久化)。关注时把完整数据存进 Room。 */
     suspend fun setFollowed(anime: AnimeEntity, followed: Boolean) {

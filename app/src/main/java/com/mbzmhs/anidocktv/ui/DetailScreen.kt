@@ -186,6 +186,7 @@ fun DetailScreen(
     var anime by remember { mutableStateOf<Anime?>(null) }
     var episodes by remember { mutableStateOf<List<EpisodeView>?>(null) }
     var error by remember { mutableStateOf("") }
+    var offline by remember { mutableStateOf(false) }   // 远端加载失败但本地有数据:降级为离线模式
     var synExpanded by remember { mutableStateOf(false) }
     var prodExpanded by remember { mutableStateOf(false) }
     var castExpanded by remember { mutableStateOf(false) }
@@ -232,19 +233,17 @@ fun DetailScreen(
     val rowH = btnH + gapPx
 
     LaunchedEffect(animeId) {
-        error = ""; synExpanded = false; prodExpanded = false; castExpanded = false
+        error = ""; offline = false; synExpanded = false; prodExpanded = false; castExpanded = false
         anime = null; episodes = null; sourcePick = null; epMenu = null
         followed = Services.repo.isFollowed(animeId)
         lastOpened = Services.repo.lastOpenedEpisode(animeId)
         dlTasks = Services.repo.downloadTasks(animeId)
-        try {
-            anime = Services.repo.getAnime(animeId)
-            episodes = Services.repo.episodes(animeId)
-            // 初始焦点:番剧列表→追番按钮;我的追番→上次看的下一集(无则第一集)
-            val epListDesc = (episodes ?: emptyList()).sortedByDescending { it.episode }
-            val hasT = anime!!.seasonLabel.isNotBlank() || anime!!.genres.isNotEmpty()
+        // 初始焦点(本地优先和远端数据共用同一口径):番剧列表→追番按钮;我的追番→上次看的下一集(无则第一集)
+        fun initFocus(fa: Anime, feps: List<EpisodeView>) {
+            val epListDesc = feps.sortedByDescending { it.episode }
+            val hasT = fa.seasonLabel.isNotBlank() || fa.genres.isNotEmpty()
             val fIdx = if (hasT) 1 else 0   // 追番按钮下标
-            val hasSyn0 = !anime!!.synopsis.isNullOrBlank()
+            val hasSyn0 = !fa.synopsis.isNullOrBlank()
             val epStart0 = fIdx + (if (hasSyn0) 1 else 0) + 1
             if (!fromFollowed) {
                 focusIdx = fIdx   // 追番按钮
@@ -254,8 +253,27 @@ fun DetailScreen(
                 focusIdx = if (nextIdx >= 0) epStart0 + nextIdx
                 else epStart0   // 第一集
             }
+        }
+        // 离线优先:本地实体 + 本地任务行合成的剧集先把页面撑起来(断网也能进库看已下载的番),
+        // 焦点必须在此刻就落到剧集上——不能等远端(离线时要等 15s 连接超时才失败,焦点会一直停在标签行);
+        // 远端数据到了再整体替换,并按新数据校准焦点(用户已手动移动过焦点就不再抢)。
+        val localAnime = Services.repo.localAnimeModel(animeId)
+        if (localAnime != null) {
+            val localEps = Services.repo.localEpisodeViews(animeId)
+            anime = localAnime
+            episodes = localEps
+            initFocus(localAnime, localEps)
+        }
+        val focusAfterLocal = focusIdx
+        try {
+            val remoteAnime = Services.repo.getAnime(animeId)
+            val remoteEps = Services.repo.episodes(animeId)
+            anime = remoteAnime
+            episodes = remoteEps
+            if (focusIdx == focusAfterLocal) initFocus(remoteAnime, remoteEps)
         } catch (e: Exception) {
-            error = e.message ?: "加载失败"
+            if (anime != null) offline = true   // 本地有内容:离线模式,仅提示不挡操作
+            else error = e.message ?: "加载失败"
         }
     }
 
@@ -715,12 +733,22 @@ fun DetailScreen(
                         .verticalScroll(scrollState)
                         .padding(start = 44.dp, end = 44.dp, top = 28.dp, bottom = 24.dp),
                 ) {
+                    // 离线模式提示:本地数据可用,不挡任何操作;网络恢复后重进详情页会自动拉全量
+                    if (offline) {
+                        Text(
+                            "离线模式:无法连接服务器,仅显示本地内容(已下载剧集可正常播放)",
+                            color = Anidock.Text3,
+                            style = MaterialTheme.typography.labelLarge,
+                            modifier = Modifier.padding(bottom = 10.dp),
+                        )
+                    }
                     DetailHeader(
                         a = aa,
                         epList = epList,
                         dlTasks = dlTasks,
                         followed = followed,
                         lastOpened = lastOpened,
+                        offline = offline,
                         hasSyn = hasSyn, hasProd = hasProd, hasCast = hasCast,
                         synExpanded = synExpanded, prodExpanded = prodExpanded, castExpanded = castExpanded,
                         cols = cols, focusIdx = focusIdx,
@@ -800,6 +828,7 @@ private fun DetailHeader(
     dlTasks: List<DownloadTaskEntity>,
     followed: Boolean,
     lastOpened: Float,
+    offline: Boolean,
     hasSyn: Boolean, hasProd: Boolean, hasCast: Boolean,
     synExpanded: Boolean, prodExpanded: Boolean, castExpanded: Boolean,
     cols: Int, focusIdx: Int,
@@ -939,6 +968,14 @@ private fun DetailHeader(
             if (epList.isNotEmpty()) {
                 Column {
                     Text("剧集", color = Anidock.Text2, style = MaterialTheme.typography.labelLarge)
+                    if (offline && epList.isEmpty()) {
+                        Text(
+                            "本地没有已下载的剧集",
+                            color = Anidock.Text3,
+                            style = MaterialTheme.typography.labelLarge,
+                            modifier = Modifier.padding(top = 6.dp),
+                        )
+                    }
                     Column(
                         verticalArrangement = Arrangement.spacedBy(EP_GAP.dp),
                         modifier = Modifier

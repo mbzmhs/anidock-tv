@@ -237,26 +237,41 @@ fun HomeScreen(
         loadJob = coroutineContext[Job]   // 记下来:返回键据此取消整个加载(含在途 HTTP 请求)
         loading = true
         try {
-            com.mbzmhs.anidocktv.Services.repo.autoLogin()
-            // 登录失败:提示用户去设置页检查密码/地址,不再继续请求
-            val le = com.mbzmhs.anidocktv.Services.repo.loginError
-            if (le.isNotEmpty()) {
-                android.widget.Toast.makeText(context, "登录失败: $le\n请到设置页检查服务器地址/访客密码", android.widget.Toast.LENGTH_LONG).show()
-                loading = false
-                return@LaunchedEffect
-            }
             if (tab == HomeTab.LIST) {
+                // 番剧列表依赖服务器;登录失败(离线)提示用户去设置页,不再无谓重试
+                com.mbzmhs.anidocktv.Services.repo.autoLogin()
+                val le = com.mbzmhs.anidocktv.Services.repo.loginError
+                if (le.isNotEmpty()) {
+                    android.widget.Toast.makeText(context, "登录失败: $le\n请到设置页检查服务器地址/访客密码", android.widget.Toast.LENGTH_LONG).show()
+                    loading = false
+                    return@LaunchedEffect
+                }
                 // search 只作用于番剧列表(服务端匹配标题/别名/标签);追番 tab 是本地数据、无标签,不按搜索过滤
                 val raw = com.mbzmhs.anidocktv.Services.repo.listPage(year, quarter, page, pageSize, hasEps, search, sort)
                 total = com.mbzmhs.anidocktv.Services.repo.total(year, quarter, hasEps, search)
                 list = com.mbzmhs.anidocktv.Services.repo.enrichWithLocalMeta(raw)
             } else {
-                // 年份/季度/只看有剧集/排序 同样作用于追番 tab(本地过滤);打开 tab(page 回到 1)时用 ids 批量刷新一次,tab 内翻页纯本地
-                if (page == 1) com.mbzmhs.anidocktv.Services.repo.refreshFollowed()
-                val raw = com.mbzmhs.anidocktv.Services.repo.followed(page, pageSize, year, quarter, hasEps, sort)
+                // 追番 tab 是纯本地数据(断网/服务器挂掉照样能看):本地列表先出、立即结束加载态;
+                // 再尝试登录+批量刷新远端状态(失败静默,慢请求也不挡列表;刷新后本地有变就原地更新)。
+                // 登录门槛只在番剧列表分支——离线时绝不能因为登录失败把本地追番库也挡住。
+                list = com.mbzmhs.anidocktv.Services.repo.enrichWithLocalMeta(
+                    com.mbzmhs.anidocktv.Services.repo.followed(page, pageSize, year, quarter, hasEps, sort)
+                )
                 total = com.mbzmhs.anidocktv.Services.repo.followedCount(year, quarter, hasEps)
-                list = com.mbzmhs.anidocktv.Services.repo.enrichWithLocalMeta(raw)
                 android.util.Log.d("AnidockTV", "followed load: page=$page size=${list.size} total=$total")
+                loading = false
+                shown.value = tab to filters
+                if (list.isEmpty()) { block = BLOCK_TAB; col = 0 }
+                if (page == 1) {
+                    com.mbzmhs.anidocktv.Services.repo.autoLogin()
+                    if (com.mbzmhs.anidocktv.Services.repo.loginError.isEmpty()) {
+                        com.mbzmhs.anidocktv.Services.repo.refreshFollowed()
+                        list = com.mbzmhs.anidocktv.Services.repo.enrichWithLocalMeta(
+                            com.mbzmhs.anidocktv.Services.repo.followed(page, pageSize, year, quarter, hasEps, sort)
+                        )
+                        total = com.mbzmhs.anidocktv.Services.repo.followedCount(year, quarter, hasEps)
+                    }
+                }
             }
             // 加载成功:记录屏幕数据对应的 tab/filters(取消加载时回退到它)
             shown.value = tab to filters
