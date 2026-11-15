@@ -19,16 +19,21 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
-import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -39,6 +44,7 @@ import com.mbzmhs.anidocktv.Services
 import com.mbzmhs.anidocktv.data.AnimeCardData
 import com.mbzmhs.anidocktv.ui.theme.Anidock
 import coil.compose.AsyncImage
+import kotlin.math.exp
 
 /**
  * 方形封面卡片(对齐 web AnimeCard)。选中态:粗边框 + 放大 + 底色提亮。
@@ -51,24 +57,62 @@ fun AnimeCard(
     isFocused: Boolean,
 ) {
     val anime = data.anime
-    // 外层 Box 承载"骑在卡外"的未读蓝点,缩放也一并套在外面,蓝点跟着卡片走
+    val focusedScale = if (isFocused) 1.08f else 1f
+    // 辉光参数按密度预计算一次,drawBehind 每帧只做 24 次圆角矩形绘制,
+    // 不在绘制回调里做 exp/分配(滚动时每帧都会走这里)。
+    val density = LocalDensity.current
+    val (cornerPx, glowRings) = remember(density) {
+        val corner = with(density) { 14.dp.toPx() }
+        val glow = with(density) { 30.dp.toPx() }
+        val tau = with(density) { 12.dp.toPx() }
+        val layers = 24
+        val peak = 0.20f
+        // 目标光晕 alpha 曲线:峰值 0.20,按 exp(-d/tau) 衰减(近边缘陡、外侧长拖尾)。
+        // 每层只存"相邻两层目标 alpha 的差",叠加后即得到这条曲线;
+        // 等距固定 alpha 会叠成近边缘平、外沿突断的硬边(实测)。
+        fun profile(d: Float) = peak * exp(-d / tau)
+        val rings = (layers downTo 1).map { i ->
+            val spread = glow * i / layers
+            val next = glow * (i + 1) / layers
+            spread to (profile(spread) - profile(next)).coerceAtLeast(0f)
+        }
+        corner to rings
+    }
+    // 外层 Box 承载"骑在卡外"的未读蓝点,缩放也一并套在外面,蓝点跟着卡片走。
+    // 辉光必须自绘而不能用 Modifier.shadow:elevation 阴影不跟随 graphicsLayer 缩放,
+    // 卡片放大后阴影仍按原尺寸生成,左右外沿就对不上(实测移入同一 layer 也无效)。
+    // 这里在缩放层内叠多层圆角矩形,光晕会跟卡片一起缩放。
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .scale(if (isFocused) 1.08f else 1f),
+            .graphicsLayer {
+                scaleX = focusedScale
+                scaleY = focusedScale
+                clip = false
+            }
+            .drawBehind {
+                if (!isFocused) return@drawBehind
+                // 层数不能太多:64 层时每层 alpha 仅 ~0.003,8-bit 混合会把 R/G 分量
+                // 量化掉,只剩蓝通道累加,颜色会发青绿;24 层保证每层色差 >= 1/255。
+                // 颜色按 accent 6 : accent2 4 混合:原 accent 直接叠在暗底上偏青,
+                // 纯 accent2 又太紫;混合后接近原 elevation 阴影的蓝紫观感。
+                val glowColor = Color(0xFF6E79FB)
+                for ((spread, alpha) in glowRings) {
+                    if (alpha < 0.0001f) continue
+                    drawRoundRect(
+                        color = glowColor.copy(alpha = alpha),
+                        topLeft = Offset(-spread, -spread),
+                        size = Size(size.width + spread * 2, size.height + spread * 2),
+                        cornerRadius = CornerRadius(cornerPx + spread, cornerPx + spread),
+                    )
+                }
+            },
     ) {
         Surface(
             shape = RoundedCornerShape(14.dp),
             color = Anidock.Card,
             modifier = Modifier
                 .fillMaxWidth()
-                // 聚焦辉光:accent 彩色阴影从卡片四周透出,替代原来"无光"的粗边框
-                .shadow(
-                    elevation = if (isFocused) 18.dp else 0.dp,
-                    shape = RoundedCornerShape(14.dp),
-                    ambientColor = Anidock.Accent.copy(alpha = if (isFocused) 0.55f else 0f),
-                    spotColor = Anidock.Accent.copy(alpha = if (isFocused) 0.65f else 0f),
-                )
                 .border(
                     width = if (isFocused) 3.dp else 1.dp,
                     color = if (isFocused) Anidock.Accent else Anidock.BorderSoft,

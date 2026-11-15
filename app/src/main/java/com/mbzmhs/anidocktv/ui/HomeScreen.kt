@@ -39,6 +39,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import com.mbzmhs.anidocktv.data.AnimeCardData
@@ -711,11 +712,14 @@ private fun GridWithPager(
             ) {
                 repeat(cols) { c ->
                     val item = rowList.getOrNull(c)
-                    Box(modifier = Modifier.weight(1f)) {
+                    val focused = block == BLOCK_GRID && r * cols + c == row * cols + col
+                    // 聚焦卡放大后的辉光会超出 16dp 间距,不提升层级就会被后画的邻卡
+                    // 盖掉一侧,看起来像辉光整体偏左/偏右;提到最上层让辉光对称盖在邻卡上
+                    Box(modifier = Modifier.weight(1f).zIndex(if (focused) 1f else 0f)) {
                         if (item != null) {
                             AnimeCard(
                                 data = item,
-                                isFocused = block == BLOCK_GRID && r * cols + c == row * cols + col,
+                                isFocused = focused,
                             )
                         }
                     }
